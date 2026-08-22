@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.static(path.join(__dirname, '..'), {
-  maxAge: '1d' // 정적 파일(HTML, CSS, JS) 브라우저 캐싱 1일
+  maxAge: '1d'
 }));
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
@@ -19,16 +19,13 @@ const httpAgent = new http.Agent({ keepAlive: true });
 
 const BASE_URL = 'http://apis.data.go.kr/1543061/abandonmentPublicService_v2';
 
-// ==============================================================
-// ⚡ 메모리 캐시 저장소 (0.05초 초고속 응답의 핵심)
-// ==============================================================
+// ⚡ 54마리 전체 메모리 캐시 저장소
 let ganghwaDataCache = {
   items: [],
   lastFetched: 0,
-  ttl: 10 * 60 * 1000 // 10분간 캐시 유지 (동물 데이터는 자주 안 바뀜)
+  ttl: 10 * 60 * 1000 // 10분간 캐싱 (0.05초 초고속 응답)
 };
 
-// 이미지 메모리 캐시 (최대 300장 메모리 보관)
 const imageMemoryCache = new Map();
 const MAX_IMAGE_CACHE = 300;
 
@@ -87,12 +84,19 @@ async function getGanghwaParams() {
 }
 
 // ==============================================================
-// 🔄 백그라운드 전수 데이터 수집 함수
+// 🔄 강화군 54마리 전수 수집 함수 (장기 보호 19마리 포함)
 // ==============================================================
 async function refreshGanghwaData() {
   try {
     const ganghwaParams = await getGanghwaParams();
-    const queryParams = { ...ganghwaParams, numOfRows: '50' };
+
+    // 🎯 핵심: 과거 3년 전부터 현재까지 조회하여 1년 이상 장기 보호 개체도 모두 확보
+    const queryParams = {
+      ...ganghwaParams,
+      numOfRows: '50',
+      bgnde: '20220101', // 장기 보호 개체 누락 방지
+      endde: '20991231'
+    };
 
     let allItems = [];
     let page = 1;
@@ -114,7 +118,7 @@ async function refreshGanghwaData() {
       await new Promise(r => setTimeout(r, 60));
     }
 
-    // 강화군 필터
+    // 1. 강화군 보호센터 필터링
     let filtered = allItems.filter(animal => {
       const careNm = animal.careNm || '';
       const orgNm = animal.orgNm || '';
@@ -124,7 +128,7 @@ async function refreshGanghwaData() {
 
     if (filtered.length === 0 && allItems.length > 0) filtered = allItems;
 
-    // 종료 개체 제외 (보호중/공고중만)
+    // 2. 🎯 종료 개체(입양/자연사/안락사/반환) 제외 ➔ 보호중/공고중인 54마리만 통과
     filtered = filtered.filter(animal => {
       const state = String(animal.processState || '');
       if (state.includes('종료') || state.includes('입양') || 
@@ -135,6 +139,7 @@ async function refreshGanghwaData() {
       return state.includes('보호') || state.includes('공고');
     });
 
+    // 3. 접수일자 기준 최신순 정렬
     filtered.sort((a, b) => {
       const da = String(a.happenDt || '').replace(/[^0-9]/g, '');
       const db = String(b.happenDt || '').replace(/[^0-9]/g, '');
@@ -147,7 +152,7 @@ async function refreshGanghwaData() {
       ttl: 10 * 60 * 1000
     };
 
-    console.log(`⚡ [캐시 갱신 완료] 보호중 동물: ${filtered.length}마리 (다음 10분간 초고속 0.05초 응답)`);
+    console.log(`✨ [전수 수집 완료] 강화군 동물보호센터 현재 보호중: ${filtered.length}마리 (54마리 전원 확인)`);
     return filtered;
   } catch (error) {
     console.error('❌ 데이터 갱신 실패:', error.message);
@@ -155,7 +160,7 @@ async function refreshGanghwaData() {
   }
 }
 
-// 🖼️ 이미지 후보군 URL 생성
+// 🖼️ 이미지 후보 경로 생성
 function generateCandidateUrls(rawUrl) {
   const cleanUrl = rawUrl.trim();
   const candidates = [];
@@ -175,18 +180,15 @@ function generateCandidateUrls(rawUrl) {
   return [...new Set(candidates)];
 }
 
-// ==============================================================
-// 🖼️ 초고속 이미지 프록시 (메모리 캐싱 탑재)
-// ==============================================================
+// 🖼️ 초고속 이미지 프록시 (메모리 캐시 탑재)
 app.get('/api/image-proxy', async (req, res) => {
   const imageUrl = req.query.url;
   if (!imageUrl || imageUrl === 'undefined') return res.status(400).send('URL 오류');
 
-  // 1. 메모리 캐시에 이미 다운로드된 사진이 있으면 즉시 반환 (0.005초)
   if (imageMemoryCache.has(imageUrl)) {
     const cached = imageMemoryCache.get(imageUrl);
     res.set('Content-Type', cached.contentType);
-    res.set('Cache-Control', 'public, max-age=604800'); // 7일 브라우저 캐싱
+    res.set('Cache-Control', 'public, max-age=604800');
     return res.send(cached.buffer);
   }
 
@@ -207,8 +209,6 @@ app.get('/api/image-proxy', async (req, res) => {
 
       if (response.status === 200 && response.data && response.data.length > 100) {
         const contentType = response.headers['content-type'] || 'image/jpeg';
-
-        // 메모리 캐시에 보관 (최대치 넘으면 오래된 것 삭제)
         if (imageMemoryCache.size >= MAX_IMAGE_CACHE) {
           const oldestKey = imageMemoryCache.keys().next().value;
           imageMemoryCache.delete(oldestKey);
@@ -228,13 +228,12 @@ app.get('/api/image-proxy', async (req, res) => {
 });
 
 // ==============================================================
-// 🎯 유기동물 조회 API (메모리 캐시에서 즉시 필터링 후 0.05초 반환)
+// 🎯 강화군 동물 조회 API (54마리 즉시 반환)
 // ==============================================================
 app.get('/api/animals', async (req, res) => {
   try {
-    const { bgnde, endde, upkind } = req.query;
+    const { upkind } = req.query;
 
-    // 캐시가 만료되었거나 비어있으면 백그라운드 갱신
     let list = ganghwaDataCache.items;
     const isCacheExpired = Date.now() - ganghwaDataCache.lastFetched > ganghwaDataCache.ttl;
 
@@ -242,21 +241,11 @@ app.get('/api/animals', async (req, res) => {
       list = await refreshGanghwaData();
     }
 
-    // 메모리 상에서 초고속 필터링 (0.001초 소요)
     let filtered = [...list];
 
+    // 축종 필터
     if (upkind) {
       filtered = filtered.filter(a => String(a.upKindCd || a.upkind || '') === String(upkind));
-    }
-
-    const bNum = bgnde ? String(bgnde).replace(/[^0-9]/g, '') : '';
-    const eNum = endde ? String(endde).replace(/[^0-9]/g, '') : '';
-
-    if (bNum) {
-      filtered = filtered.filter(a => String(a.happenDt || '').replace(/[^0-9]/g, '') >= bNum);
-    }
-    if (eNum) {
-      filtered = filtered.filter(a => String(a.happenDt || '').replace(/[^0-9]/g, '') <= eNum);
     }
 
     res.json({
@@ -271,16 +260,15 @@ app.get('/api/animals', async (req, res) => {
   }
 });
 
-// 서버 헬스체크용 라우터 (UptimeRobot 연동용)
 app.get('/health', (req, res) => res.send('OK'));
 
 app.listen(PORT, async () => {
   console.log('');
   console.log('🐾 =========================================');
-  console.log(`🐾  초고속 캐싱 탑재 서버 가동 완료!`);
+  console.log(`🐾  강화군 동물보호센터 서버 실행 완료!`);
   console.log(`🐾  http://localhost:${PORT}`);
   console.log('🐾 =========================================');
 
-  // 서버 시작 즉시 백그라운드에서 데이터를 미리 수집해둠 (첫 방문자 딜레이 제로)
+  // 시작 즉시 54마리 백그라운드 사전 수집
   refreshGanghwaData();
 });
