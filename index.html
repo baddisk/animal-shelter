@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <title>🐾 강화군 동물보호센터 - 보호중인 유기동물</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+
+  <!-- 헤더 -->
+  <header class="header">
+    <div class="container">
+      <h1><i class="fas fa-paw"></i> 강화군 동물보호센터</h1>
+      <p>강화도에서 가족을 기다리는 <b>보호중</b> 아이들입니다 🐶🐱</p>
+    </div>
+  </header>
+
+  <!-- 검색 필터 -->
+  <section class="filters">
+    <div class="container">
+      <div class="filter-grid">
+        <div class="filter-group">
+          <label><i class="fas fa-dog"></i> 축종</label>
+          <select id="upkind">
+            <option value="">전체 축종</option>
+            <option value="417000">🐶 강아지</option>
+            <option value="422400">🐱 고양이</option>
+            <option value="429900">🐾 기타</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label><i class="far fa-calendar-alt"></i> 조회 시작일 (1년 전)</label>
+          <input type="date" id="bgnde">
+        </div>
+
+        <div class="filter-group">
+          <label><i class="far fa-calendar-alt"></i> 조회 종료일 (오늘)</label>
+          <input type="date" id="endde">
+        </div>
+
+        <div class="filter-group">
+          <label><i class="fas fa-shield-alt"></i> 보호센터 (고정)</label>
+          <input type="text" value="강화군 동물보호센터" readonly class="input-fixed">
+        </div>
+
+        <div class="filter-group">
+          <button id="searchBtn" class="btn-search">
+            <i class="fas fa-search"></i> 검색하기
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 통계 바 -->
+  <section class="stats">
+    <div class="container">
+      <div class="stats-grid">
+        <div class="stat-card total">
+          <i class="fas fa-home"></i>
+          <div>
+            <span class="stat-number" id="totalCount">0</span>
+            <span class="stat-label">보호중 개체수</span>
+          </div>
+        </div>
+        <div class="stat-card dog">
+          <i class="fas fa-dog"></i>
+          <div>
+            <span class="stat-number" id="dogCount">0</span>
+            <span class="stat-label">강아지</span>
+          </div>
+        </div>
+        <div class="stat-card cat">
+          <i class="fas fa-cat"></i>
+          <div>
+            <span class="stat-number" id="catCount">0</span>
+            <span class="stat-label">고양이</span>
+          </div>
+        </div>
+        <div class="stat-card etc">
+          <i class="fas fa-paw"></i>
+          <div>
+            <span class="stat-number" id="etcCount">0</span>
+            <span class="stat-label">기타</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 동물 카드 리스트 -->
+  <section class="animals">
+    <div class="container">
+      <div id="loading" class="loading" style="display:none;">
+        <div class="spinner"></div>
+        <p>강화군 동물보호센터 데이터를 불러오는 중입니다...</p>
+      </div>
+      <div id="animalGrid" class="animal-grid"></div>
+      <div id="noData" class="no-data" style="display:none;">
+        <i class="fas fa-info-circle"></i>
+        <p>현재 보호중인 동물이 없습니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 페이지네이션 -->
+  <section class="pagination-section">
+    <div class="container">
+      <div id="pagination" class="pagination"></div>
+    </div>
+  </section>
+
+  <!-- 상세 모달창 -->
+  <div id="modal" class="modal" style="display:none;">
+    <div class="modal-content">
+      <button class="modal-close" id="modalClose">&times;</button>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <footer class="footer">
+    <div class="container">
+      <p>🐾 농림축산식품부 국가동물보호정보시스템 공공데이터 API 연동</p>
+      <p>강화군 동물보호센터 입양 문의는 상세페이지의 연락처로 문의하시기 바랍니다.</p>
+    </div>
+  </footer>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
