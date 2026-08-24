@@ -1,3 +1,7 @@
+/* ==============================================================
+   🐾 강화군 동물보호센터 - 전체 스타일 (개선판)
+   ============================================================== */
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
@@ -26,6 +30,7 @@ body {
   padding: 0 20px;
 }
 
+/* ── 헤더 ─────────────────────────────────── */
 .header {
   background: linear-gradient(135deg, #10B981, #0EA5E9);
   color: white;
@@ -33,9 +38,15 @@ body {
   text-align: center;
 }
 
+.header-link {
+  text-decoration: none;
+  color: inherit;
+}
+
 .header h1 { font-size: 2rem; margin-bottom: 6px; }
 .header p { font-size: 0.95rem; opacity: 0.95; }
 
+/* ── 필터 ─────────────────────────────────── */
 .filters {
   background: white;
   padding: 18px 0;
@@ -92,10 +103,12 @@ body {
   font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
+  transition: background 0.2s;
 }
 
 .btn-search:hover { background: var(--primary-dark); }
 
+/* ── 통계 ─────────────────────────────────── */
 .stats { padding: 20px 0; }
 
 .stats-grid {
@@ -125,18 +138,19 @@ body {
 }
 
 .stat-card.total i { color: #10B981; background: #D1FAE5; }
-.stat-card.dog i { color: #F97316; background: #FFEDD5; }
-.stat-card.cat i { color: #8B5CF6; background: #EDE9FE; }
-.stat-card.etc i { color: #0EA5E9; background: #E0F2FE; }
+.stat-card.dog i   { color: #F97316; background: #FFEDD5; }
+.stat-card.cat i   { color: #8B5CF6; background: #EDE9FE; }
+.stat-card.etc i   { color: #0EA5E9; background: #E0F2FE; }
 
 .stat-number { font-size: 1.5rem; font-weight: 700; display: block; }
-.stat-label { font-size: 0.8rem; color: var(--text-light); }
+.stat-label  { font-size: 0.8rem; color: var(--text-light); }
 
+/* ── 동물 카드 그리드 ───────────────────────── */
 .animals { padding: 15px 0 30px; }
 
 .animal-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 18px;
 }
 
@@ -145,7 +159,7 @@ body {
   border-radius: var(--radius);
   overflow: hidden;
   box-shadow: var(--shadow);
-  transition: transform 0.2s;
+  transition: transform 0.2s, box-shadow 0.2s;
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -156,22 +170,24 @@ body {
   box-shadow: 0 8px 16px rgba(0,0,0,0.1);
 }
 
+/* ── 카드 이미지: 원본 비율 유지 ────────────── */
 .card-image {
   position: relative;
   width: 100%;
-  height: 180px;
-  background: #E2E8F0;
+  background: #F1F5F9;
   overflow: hidden;
 }
 
 .card-image img {
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: auto;
   display: block;
+  min-height: 140px;
+  max-height: 280px;
+  object-fit: contain;
+  background: #F1F5F9;
 }
 
-/* 📷 사진 개수 뱃지 */
 .photo-count-badge {
   position: absolute;
   bottom: 8px;
@@ -197,7 +213,7 @@ body {
 }
 
 .badge-protect { background: #10B981; }
-.badge-notice { background: #F59E0B; }
+.badge-notice  { background: #F59E0B; }
 
 .card-kind {
   position: absolute;
@@ -262,8 +278,12 @@ body {
   font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
+  transition: background 0.2s;
 }
 
+.btn-detail:hover { background: var(--primary-dark); }
+
+/* ── 로딩 / 없음 ─────────────────────────── */
 .loading, .no-data {
   text-align: center;
   padding: 60px 0;
@@ -282,8 +302,9 @@ body {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ── 페이지네이션 ─────────────────────────── */
 .pagination-section { padding: 0 0 40px; }
-.pagination { display: flex; justify-content: center; gap: 5px; }
+.pagination { display: flex; justify-content: center; gap: 5px; flex-wrap: wrap; }
 
 .page-btn {
   min-width: 36px;
@@ -297,7 +318,10 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: all 0.2s;
 }
+
+.page-btn:hover { border-color: var(--primary); color: var(--primary); }
 
 .page-btn.active {
   background: var(--primary);
@@ -306,7 +330,7 @@ body {
 }
 
 /* ==============================================================
-   🖼️ 모달창 멀티 포토 갤러리 (7장 전체 지원)
+   🖼️ 모달 – 멀티 포토 갤러리 + 공유 버튼
    ============================================================== */
 .modal {
   position: fixed;
@@ -342,17 +366,22 @@ body {
   font-size: 1.2rem;
   cursor: pointer;
   z-index: 30;
+  transition: background 0.2s;
 }
+
+.modal-close:hover { background: rgba(0,0,0,0.85); }
 
 .modal-gallery-wrapper {
   width: 100%;
   background: #0F172A;
 }
 
+/* 모달 대표 이미지: 비율 유지 */
 .modal-main-image-box {
   position: relative;
   width: 100%;
-  height: 260px; /* 모달 대표 사진 크기 */
+  min-height: 200px;
+  max-height: 400px;
   background: #0F172A;
   display: flex;
   align-items: center;
@@ -362,9 +391,11 @@ body {
 
 .modal-main-image-box img {
   width: 100%;
-  height: 100%;
-  object-fit: contain; /* 사진 비율 유지 */
+  height: auto;
+  max-height: 400px;
+  object-fit: contain;
   background: #0F172A;
+  display: block;
 }
 
 .modal-img-badge {
@@ -379,7 +410,7 @@ body {
   font-weight: 600;
 }
 
-/* 🖼️ 썸네일 스트립 */
+/* 썸네일 스트립 */
 .modal-thumb-strip {
   display: flex;
   gap: 8px;
@@ -426,6 +457,7 @@ body {
   border-radius: 3px;
 }
 
+/* 모달 상세 */
 .modal-detail { padding: 22px; }
 .modal-detail h2 { font-size: 1.25rem; margin-bottom: 15px; }
 
@@ -444,7 +476,7 @@ body {
 }
 
 .detail-item .value { font-size: 0.9rem; }
-.detail-item.full { grid-column: 1 / -1; }
+.detail-item.full  { grid-column: 1 / -1; }
 
 .shelter-info {
   margin-top: 18px;
@@ -456,7 +488,57 @@ body {
 
 .shelter-info h3 { font-size: 1rem; margin-bottom: 12px; color: #0EA5E9; }
 
-/* 📋 원본 JSON 뷰어 */
+/* ── 공유 버튼 바 ─────────────────────────── */
+.share-bar {
+  margin-top: 18px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-share {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: white;
+  transition: all 0.2s;
+}
+
+.btn-share:hover { background: #F1F5F9; }
+
+.btn-share.link-copy  { color: #10B981; border-color: #10B981; }
+.btn-share.kakao      { color: #FEE500; background: #FEE500; color: #3C1E1E; border-color: #FEE500; }
+.btn-share.twitter    { color: #1DA1F2; border-color: #1DA1F2; }
+
+.share-toast {
+  position: fixed;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%) translateY(80px);
+  background: #1E293B;
+  color: white;
+  padding: 12px 24px;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  z-index: 9999;
+  opacity: 0;
+  transition: all 0.35s ease;
+  pointer-events: none;
+}
+
+.share-toast.show {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+}
+
+/* JSON 원본 뷰어 */
 .raw-data-section {
   margin-top: 18px;
   border-top: 1px dashed var(--border);
@@ -474,6 +556,7 @@ body {
   color: #475569;
   cursor: pointer;
   text-align: left;
+  transition: background 0.2s;
 }
 
 .btn-toggle-raw:hover { background: #E2E8F0; }
@@ -496,10 +579,22 @@ body {
   word-break: break-all;
 }
 
+/* ── 푸터 ─────────────────────────────────── */
 .footer {
   background: #1E293B;
   color: #94A3B8;
   padding: 22px 0;
   text-align: center;
   font-size: 0.85rem;
+}
+
+/* ── 반응형 ───────────────────────────────── */
+@media (max-width: 640px) {
+  .header h1 { font-size: 1.4rem; }
+  .filter-grid { flex-direction: column; }
+  .filter-group { min-width: 100%; }
+  .animal-grid { grid-template-columns: 1fr; }
+  .detail-grid { grid-template-columns: 1fr; }
+  .share-bar { flex-direction: column; }
+  .btn-share { justify-content: center; }
 }
