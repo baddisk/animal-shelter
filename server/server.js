@@ -10,6 +10,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+app.use(express.json());
 app.use(express.static(path.join(__dirname, '..')));
 
 // SSL 인증서 무시 및 커넥션 재사용 에이전트
@@ -19,12 +20,12 @@ const httpAgent = new http.Agent({ keepAlive: true });
 const BASE_URL = 'http://apis.data.go.kr/1543061/abandonmentPublicService_v2';
 
 // ==============================================================
-// ⚡ 1. 메모리 캐시 시스템 (API 응답 10분, 코드 정보 영구)
+// ⚡ 캐시 시스템 (API 응답 10분, 코드 정보 영구)
 // ==============================================================
 const animalCache = new Map();
-const CACHE_TTL = 10 * 60 * 1000; // 10분 캐시 유지
+const CACHE_TTL = 10 * 60 * 1000; // 10분
 
-let cachedGanghwaParams = null; // 강화군 지역코드 캐시
+let cachedGanghwaParams = null;
 
 // 공통 API 요청 함수
 async function fetchOpenApi(endpoint, params = {}) {
@@ -76,7 +77,7 @@ async function getGanghwaParams() {
 }
 
 // ==============================================================
-// 🎯 404 방지: 공공서버의 실제 이미지 경로 후보군 생성 함수
+// 🎯 이미지 경로 후보 생성
 // ==============================================================
 function generateCandidateUrls(rawUrl) {
   const cleanUrl = rawUrl.trim();
@@ -123,7 +124,7 @@ app.get('/api/image-proxy', async (req, res) => {
       if (response.status === 200 && response.data && response.data.length > 100) {
         const contentType = response.headers['content-type'] || 'image/jpeg';
         res.set('Content-Type', contentType);
-        res.set('Cache-Control', 'public, max-age=604800'); // 7일간 브라우저 캐싱
+        res.set('Cache-Control', 'public, max-age=604800');
         return res.send(response.data);
       }
     } catch (err) {
@@ -135,13 +136,13 @@ app.get('/api/image-proxy', async (req, res) => {
 });
 
 // ==============================================================
-// ⚡ 2. 강화군 유기동물 조회 API (전체 페이지 병렬 로딩 적용)
+// ⚡ 강화군 유기동물 데이터 병렬 수집 함수
 // ==============================================================
 async function fetchGanghwaAnimalsFromApi(queryParams) {
   const ganghwaParams = await getGanghwaParams();
   const baseParams = { ...ganghwaParams, ...queryParams, numOfRows: '50' };
 
-  // 1. 첫 번째 페이지 호출하여 전체 개수 파악
+  // 1페이지 호출하여 전체 개수 파악
   const firstPageData = await fetchOpenApi('abandonmentPublic_v2', { ...baseParams, pageNo: '1' });
   const body = firstPageData?.response?.body;
   if (!body || !body.items || !body.items.item) return [];
@@ -149,10 +150,9 @@ async function fetchGanghwaAnimalsFromApi(queryParams) {
   const totalCount = parseInt(body.totalCount) || 0;
   let allItems = Array.isArray(body.items.item) ? body.items.item : [body.items.item];
 
-  // 2. 전체 페이지 계산 (제한 없이 모든 페이지 수 계산)
-  const totalPages = Math.min(Math.ceil(totalCount / 50), 20); // 최대 20페이지(1000마리)까지 누락 없이 수집
+  const totalPages = Math.min(Math.ceil(totalCount / 50), 20); // 최대 20페이지 안전 수집
 
-  // 3. 2페이지부터 나머지 모든 페이지를 병렬(동시) 요청하여 100% 누락 없이 수집
+  // 2페이지 이상은 병렬 호출
   if (totalPages > 1) {
     const pagePromises = [];
     for (let p = 2; p <= totalPages; p++) {
@@ -184,9 +184,9 @@ async function fetchGanghwaAnimalsFromApi(queryParams) {
   // 종료 개체 제외 (보호중/공고중만)
   filtered = filtered.filter(animal => {
     const state = String(animal.processState || '');
-    if (state.includes('종료') || state.includes('입양') || 
-        state.includes('자연사') || state.includes('안락사') || 
-        state.includes('반환') || state.includes('기증')) {
+    if (state.includes('종료') || state.includes('입양') ||
+      state.includes('자연사') || state.includes('안락사') ||
+      state.includes('반환') || state.includes('기증')) {
       return false;
     }
     return state.includes('보호') || state.includes('공고');
@@ -202,9 +202,13 @@ async function fetchGanghwaAnimalsFromApi(queryParams) {
   return filtered;
 }
 
+// ==============================================================
+// ⚡ 강화군 유기동물 조회 API
+// ?refresh=1 : 캐시 삭제 후 공공서버에서 실시간 재조회
+// ==============================================================
 app.get('/api/animals', async (req, res) => {
   try {
-    const { bgnde, endde, upkind } = req.query;
+    const { bgnde, endde, upkind, refresh } = req.query;
 
     const queryParams = {};
     if (bgnde) queryParams.bgnde = String(bgnde).replace(/[^0-9]/g, '');
@@ -212,10 +216,18 @@ app.get('/api/animals', async (req, res) => {
     if (upkind) queryParams.upkind = upkind;
 
     const cacheKey = JSON.stringify(queryParams);
+    const forceRefresh = refresh === '1' || refresh === 'true';
+
+    // 🔄 검색하기(refresh) 요청이면 해당 조건 캐시 삭제
+    if (forceRefresh) {
+      animalCache.delete(cacheKey);
+      console.log('🗑️ [캐시 삭제] 검색하기 요청으로 캐시 초기화:', cacheKey);
+    }
+
     const cachedData = animalCache.get(cacheKey);
 
-    // ⚡ 메모리 캐시에 데이터가 있고 10분이 안 지났으면 즉시 반환
-    if (cachedData && (Date.now() - cachedData.timestamp < CACHE_TTL)) {
+    // 캐시 히트 (refresh 아닐 때만)
+    if (!forceRefresh && cachedData && (Date.now() - cachedData.timestamp < CACHE_TTL)) {
       console.log(`⚡ [캐시 적중] 메모리에서 즉시 반환 (${cachedData.items.length}마리)`);
       return res.json({
         total: cachedData.items.length,
@@ -224,7 +236,7 @@ app.get('/api/animals', async (req, res) => {
       });
     }
 
-    console.log('🔄 [공공 API 요청] 전체 데이터를 공공서버에서 누락 없이 수집합니다...');
+    console.log('🔄 [공공 API 요청] 최신 데이터를 공공서버에서 가져옵니다...', forceRefresh ? '(강제 새로고침)' : '');
     const filteredItems = await fetchGanghwaAnimalsFromApi(queryParams);
 
     animalCache.set(cacheKey, {
@@ -243,10 +255,20 @@ app.get('/api/animals', async (req, res) => {
   } catch (error) {
     console.error('❌ 유기동물 조회 에러:', error.message);
 
-    const cacheKey = JSON.stringify(req.query || {});
-    const cachedData = animalCache.get(cacheKey);
+    const { bgnde, endde, upkind } = req.query;
+    const fallbackKey = JSON.stringify({
+      ...(bgnde ? { bgnde: String(bgnde).replace(/[^0-9]/g, '') } : {}),
+      ...(endde ? { endde: String(endde).replace(/[^0-9]/g, '') } : {}),
+      ...(upkind ? { upkind } : {})
+    });
+    const cachedData = animalCache.get(fallbackKey);
     if (cachedData) {
-      return res.json({ total: cachedData.items.length, items: cachedData.items, fromCache: true });
+      return res.json({
+        total: cachedData.items.length,
+        items: cachedData.items,
+        fromCache: true,
+        stale: true
+      });
     }
 
     res.status(500).json({ error: error.message, total: 0, items: [] });
@@ -254,7 +276,18 @@ app.get('/api/animals', async (req, res) => {
 });
 
 // ==============================================================
-// 🚀 서버 시작 및 백그라운드 데이터 예열 (Warm-up)
+// 🗑️ 캐시 전체 비우기 관리용 엔드포인트
+// POST /api/cache/clear
+// ==============================================================
+app.post('/api/cache/clear', (req, res) => {
+  const count = animalCache.size;
+  animalCache.clear();
+  console.log(`🗑️ [캐시 전체 삭제] 총 ${count}개 항목 삭제됨`);
+  res.json({ ok: true, message: `${count}개의 캐시가 삭제되었습니다.` });
+});
+
+// ==============================================================
+// 🚀 서버 시작 및 백그라운드 데이터 예열
 // ==============================================================
 app.listen(PORT, async () => {
   console.log('');
