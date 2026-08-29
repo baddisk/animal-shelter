@@ -4,11 +4,10 @@ const ITEMS_PER_PAGE = 20;
 let allAnimals = [];
 let currentStatsFilter = 'all';
 let currentPage = 1;
-let totalPages = 1;
 let pendingDetailId = null;
 let isModalOpen = false;
 
-// 🎯 HTML 속성에 안전하게 넣도록 encodeURIComponent 사용 (따옴표 깨짐 방지)
+// 이미지 준비중 SVG
 const PLACEHOLDER_SVG = 'data:image/svg+xml,' + encodeURIComponent(
   `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
     <rect width="400" height="300" fill="#e2e8f0"/>
@@ -19,7 +18,6 @@ const PLACEHOLDER_SVG = 'data:image/svg+xml,' + encodeURIComponent(
 
 const SHELTER_LOGO_SRC = 'logo.svg';
 
-// 🎯 onerror 를 HTML 인라인에 SVG를 넣지 않고 JS로 처리 (텍스트 누수 방지)
 window.handleImgError = function (img) {
   if (!img || img.dataset.fallback === '1') return;
   img.dataset.fallback = '1';
@@ -59,6 +57,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setupStatsFilterEvents();
 
+  // 🚀 무한 스크롤 및 Top 버튼 초기화
+  setupInfiniteScroll();
+  setupTopButton();
+
   document.getElementById('modalClose').addEventListener('click', closeModal);
   document.getElementById('modal').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeModal();
@@ -93,7 +95,6 @@ function getShareId(animalOrNoticeNo) {
 
   const m = id.match(/(\d{4}-\d+)/);
   if (m) return m[1];
-
   return id;
 }
 
@@ -117,7 +118,6 @@ function parseDetailHash() {
 function setDetailHash(shareId) {
   const next = shareId ? `#detail/${shareId}` : '';
   if ((window.location.hash || '') === next) return;
-
   if (next) {
     history.replaceState(null, '', next);
   } else {
@@ -144,9 +144,14 @@ function openDetailByShareId(shareId) {
   const animal = allAnimals[idx];
   const filteredIndex = filtered.indexOf(animal);
   if (filteredIndex >= 0) {
-    currentPage = Math.floor(filteredIndex / ITEMS_PER_PAGE) + 1;
-    renderPage();
-    renderPagination();
+    // 해당 아이템이 렌더링되지 않았을 수 있으므로 currentPage를 충분히 늘림
+    const neededPage = Math.floor(filteredIndex / ITEMS_PER_PAGE) + 1;
+    if (neededPage > currentPage) {
+      while(currentPage < neededPage) {
+        currentPage++;
+        renderPage(true); // 누적 렌더링
+      }
+    }
   }
 
   showDetail(idx, { fromHash: true });
@@ -160,8 +165,7 @@ function handleHashChange() {
       pendingDetailId = id;
       return;
     }
-    const opened = openDetailByShareId(id);
-    if (!opened) console.warn('딥링크 공고를 찾을 수 없습니다:', id);
+    openDetailByShareId(id);
   } else if (isModalOpen) {
     closeModal({ skipHashClear: true });
   }
@@ -171,10 +175,12 @@ function tryOpenPendingDetail() {
   if (!pendingDetailId) return;
   const id = pendingDetailId;
   pendingDetailId = null;
-  const opened = openDetailByShareId(id);
-  if (!opened) console.warn('공유 링크 동물을 목록에서 찾지 못했습니다:', id);
+  openDetailByShareId(id);
 }
 
+// ==============================================================
+// 데이터 조회
+// ==============================================================
 async function searchAnimals() {
   showLoading(true);
 
@@ -193,17 +199,17 @@ async function searchAnimals() {
 
     allAnimals = result.items || [];
     currentStatsFilter = 'all';
+    currentPage = 1; // 검색 시 첫 페이지로
     updateStatsActiveCard();
 
-    renderPage();
-    renderPagination();
+    renderPage(false); // 새로 그리기
     updateStats();
 
     tryOpenPendingDetail();
   } catch (error) {
     console.error('데이터 조회 실패:', error);
     allAnimals = [];
-    renderPage();
+    renderPage(false);
   }
 
   showLoading(false);
@@ -236,8 +242,7 @@ function handleStatsFilterChange(filterType) {
   currentStatsFilter = filterType;
   currentPage = 1;
   updateStatsActiveCard();
-  renderPage();
-  renderPagination();
+  renderPage(false); // 새로 그리기
 }
 
 function updateStatsActiveCard() {
@@ -265,12 +270,7 @@ function extractAllImages(animal) {
       const cleanUrl = val.trim();
       if (!seen.has(cleanUrl)) {
         seen.add(cleanUrl);
-        list.push({
-          num: i,
-          key: key,
-          url: `${API_BASE}/image-proxy?url=${encodeURIComponent(cleanUrl)}`,
-          rawUrl: cleanUrl
-        });
+        list.push({ num: i, key: key, url: `${API_BASE}/image-proxy?url=${encodeURIComponent(cleanUrl)}`, rawUrl: cleanUrl });
       }
     }
   }
@@ -282,16 +282,10 @@ function extractAllImages(animal) {
       const cleanUrl = val.trim();
       if (!seen.has(cleanUrl)) {
         seen.add(cleanUrl);
-        list.push({
-          num: list.length + 1,
-          key: gk,
-          url: `${API_BASE}/image-proxy?url=${encodeURIComponent(cleanUrl)}`,
-          rawUrl: cleanUrl
-        });
+        list.push({ num: list.length + 1, key: gk, url: `${API_BASE}/image-proxy?url=${encodeURIComponent(cleanUrl)}`, rawUrl: cleanUrl });
       }
     }
   }
-
   return list;
 }
 
@@ -300,10 +294,34 @@ function getThumbnailUrl(animal) {
   return images.length > 0 ? images[0].url : PLACEHOLDER_SVG;
 }
 
-function renderPage() {
+// ==============================================================
+// 🚀 무한 스크롤 및 렌더링
+// ==============================================================
+function setupInfiniteScroll() {
+  const target = document.createElement('div');
+  target.id = 'scrollAnchor';
+  document.getElementById('animalGrid').insertAdjacentElement('afterend', target);
+
+  const observer = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting) {
+      loadMoreAnimals();
+    }
+  }, { rootMargin: '100px' });
+
+  observer.observe(target);
+}
+
+function loadMoreAnimals() {
+  const filtered = getFilteredAnimals();
+  if (currentPage * ITEMS_PER_PAGE < filtered.length) {
+    currentPage++;
+    renderPage(true); // 기존 목록에 추가(Append)
+  }
+}
+
+function renderPage(isAppend = false) {
   const grid = document.getElementById('animalGrid');
   const noData = document.getElementById('noData');
-
   const filtered = getFilteredAnimals();
 
   if (filtered.length === 0) {
@@ -317,7 +335,7 @@ function renderPage() {
   const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
   const pageItems = filtered.slice(startIndex, startIndex + ITEMS_PER_PAGE);
 
-  grid.innerHTML = pageItems.map((animal) => {
+  const html = pageItems.map((animal) => {
     const realIndex = allAnimals.indexOf(animal);
     const kindText = formatKind(animal.kindFullNm || animal.kindNm || animal.kindCd);
     const sexNeuter = `${getSexIcon(animal.sexCd)} / ${animal.neuterYn === 'Y' ? '중성화O' : '중성화X'}`;
@@ -330,10 +348,7 @@ function renderPage() {
     return `
       <div class="animal-card" onclick="showDetail(${realIndex})">
         <div class="card-image">
-          <img src="${imgSrc}" 
-               alt="${kindText}" 
-               loading="lazy"
-               onerror="handleImgError(this)">
+          <img src="${imgSrc}" alt="${kindText}" loading="lazy" onerror="handleImgError(this)">
           <span class="card-badge ${stateClass}">${stateText}</span>
           <span class="card-kind">${kindText}</span>
           ${imgCount > 1 ? `<span class="photo-count-badge"><i class="fas fa-camera"></i> ${imgCount}장</span>` : ''}
@@ -341,18 +356,9 @@ function renderPage() {
         <div class="card-body">
           <h3>${animal.noticeNo || '공고번호 미상'}</h3>
           <div class="card-info">
-            <div class="card-info-item">
-              <i class="fas fa-map-marker-alt"></i>
-              <span>${animal.happenPlace || '강화군 일대'}</span>
-            </div>
-            <div class="card-info-item">
-              <i class="fas fa-palette"></i>
-              <span>${animal.colorCd || '색상미상'} · ${animal.age || '나이미상'}</span>
-            </div>
-            <div class="card-info-item">
-              <i class="fas fa-venus-mars"></i>
-              <span>${sexNeuter}</span>
-            </div>
+            <div class="card-info-item"><i class="fas fa-map-marker-alt"></i><span>${animal.happenPlace || '강화군 일대'}</span></div>
+            <div class="card-info-item"><i class="fas fa-palette"></i><span>${animal.colorCd || '색상미상'} · ${animal.age || '나이미상'}</span></div>
+            <div class="card-info-item"><i class="fas fa-venus-mars"></i><span>${sexNeuter}</span></div>
           </div>
         </div>
         <div class="card-footer">
@@ -362,8 +368,41 @@ function renderPage() {
       </div>
     `;
   }).join('');
+
+  if (isAppend) {
+    grid.insertAdjacentHTML('beforeend', html);
+  } else {
+    grid.innerHTML = html;
+  }
 }
 
+// ==============================================================
+// ⬆️ Top 버튼 추가
+// ==============================================================
+function setupTopButton() {
+  const btn = document.createElement('button');
+  btn.id = 'topBtn';
+  btn.className = 'btn-top hidden';
+  btn.innerHTML = '<i class="fas fa-arrow-up"></i>';
+  btn.title = '맨 위로 가기';
+  document.body.appendChild(btn);
+
+  btn.addEventListener('click', () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+
+  window.addEventListener('scroll', () => {
+    if (window.scrollY > 300) {
+      btn.classList.remove('hidden');
+    } else {
+      btn.classList.add('hidden');
+    }
+  });
+}
+
+// ==============================================================
+// 🎯 상세 모달창
+// ==============================================================
 function showDetail(index, options = {}) {
   const animal = allAnimals[index];
   if (!animal) return;
@@ -382,19 +421,13 @@ function showDetail(index, options = {}) {
     galleryHtml = `
       <div class="modal-gallery-wrapper">
         <div class="modal-main-image-box">
-          <img id="modalMainImg" 
-               src="${images[0].url}" 
-               alt="대표 사진" 
-               onerror="handleImgError(this)">
+          <img id="modalMainImg" src="${images[0].url}" alt="대표 사진" onerror="handleImgError(this)">
           <span id="modalImgBadge" class="modal-img-badge">1 / ${images.length} (popfile1)</span>
         </div>
-
         ${images.length > 1 ? `
           <div class="modal-thumb-strip">
             ${images.map((img, i) => `
-              <button type="button" 
-                      class="modal-thumb-btn ${i === 0 ? 'active' : ''}" 
-                      onclick="selectModalImage('${img.url}', '${i + 1} / ${images.length} (${img.key})', this)">
+              <button type="button" class="modal-thumb-btn ${i === 0 ? 'active' : ''}" onclick="selectModalImage('${img.url}', '${i + 1} / ${images.length} (${img.key})', this)">
                 <img src="${img.url}" alt="사진 ${i + 1}" onerror="handleImgError(this)">
                 <span class="thumb-num">${i + 1}</span>
               </button>
@@ -404,20 +437,13 @@ function showDetail(index, options = {}) {
       </div>
     `;
   } else {
-    galleryHtml = `
-      <div class="modal-gallery-wrapper">
-        <div class="modal-main-image-box">
-          <img src="${PLACEHOLDER_SVG}" alt="사진 미등록">
-        </div>
-      </div>
-    `;
+    galleryHtml = `<div class="modal-gallery-wrapper"><div class="modal-main-image-box"><img src="${PLACEHOLDER_SVG}" alt="사진 미등록"></div></div>`;
   }
 
   const rawJsonString = JSON.stringify(animal, null, 2);
 
   document.getElementById('modalBody').innerHTML = `
     ${galleryHtml}
-
     <div class="modal-detail">
       <div class="modal-title-row">
         <h2>${animal.noticeNo || '공고'} (${kindTitle})</h2>
@@ -427,72 +453,29 @@ function showDetail(index, options = {}) {
       </div>
 
       <div class="detail-grid">
-        <div class="detail-item">
-          <span class="label">보호 상태</span>
-          <span class="value" style="font-weight:bold; color:#10B981;">${stateText}</span>
-        </div>
-        <div class="detail-item">
-          <span class="label">성별 / 중성화</span>
-          <span class="value">${getSexIcon(animal.sexCd)} / ${animal.neuterYn === 'Y' ? '중성화 완료' : '중성화 안됨'}</span>
-        </div>
-        <div class="detail-item">
-          <span class="label">나이 / 체중</span>
-          <span class="value">${animal.age || '미상'} / ${animal.weight || '미상'}</span>
-        </div>
-        <div class="detail-item">
-          <span class="label">털색</span>
-          <span class="value">${animal.colorCd || '미상'}</span>
-        </div>
-        <div class="detail-item full">
-          <span class="label">발견 장소</span>
-          <span class="value">${animal.happenPlace || '정보 없음'}</span>
-        </div>
-        <div class="detail-item">
-          <span class="label">접수일자</span>
-          <span class="value">${formatDate(animal.happenDt)}</span>
-        </div>
-        <div class="detail-item">
-          <span class="label">공고 기간</span>
-          <span class="value">${noticePeriod}</span>
-        </div>
-        <div class="detail-item full">
-          <span class="label">특징 및 건강상태</span>
-          <span class="value" style="background:#F0FDF4; padding:8px 10px; border-radius:6px; line-height:1.4;">${animal.specialMark || '특이사항 없음'}</span>
-        </div>
+        <div class="detail-item"><span class="label">보호 상태</span><span class="value" style="font-weight:bold; color:#10B981;">${stateText}</span></div>
+        <div class="detail-item"><span class="label">성별 / 중성화</span><span class="value">${getSexIcon(animal.sexCd)} / ${animal.neuterYn === 'Y' ? '중성화 완료' : '중성화 안됨'}</span></div>
+        <div class="detail-item"><span class="label">나이 / 체중</span><span class="value">${animal.age || '미상'} / ${animal.weight || '미상'}</span></div>
+        <div class="detail-item"><span class="label">털색</span><span class="value">${animal.colorCd || '미상'}</span></div>
+        <div class="detail-item full"><span class="label">발견 장소</span><span class="value">${animal.happenPlace || '정보 없음'}</span></div>
+        <div class="detail-item"><span class="label">접수일자</span><span class="value">${formatDate(animal.happenDt)}</span></div>
+        <div class="detail-item"><span class="label">공고 기간</span><span class="value">${noticePeriod}</span></div>
+        <div class="detail-item full"><span class="label">특징 및 건강상태</span><span class="value" style="background:#F0FDF4; padding:8px 10px; border-radius:6px; line-height:1.4;">${animal.specialMark || '특이사항 없음'}</span></div>
       </div>
 
       <div class="shelter-info">
         <h3 class="shelter-title"><i class="fas fa-home"></i> 입양 문의처</h3>
-
         <div class="detail-grid shelter-grid">
-          <div class="detail-item full">
-            <span class="label">보호센터명</span>
-            <span class="value" style="font-weight:bold;">${animal.careNm || '강화군 동물보호센터'}</span>
-          </div>
-          <div class="detail-item full">
-            <span class="label">보호소 주소</span>
-            <span class="value">${animal.careAddr || '인천광역시 강화군'}</span>
-          </div>
-          <div class="detail-item">
-            <span class="label">전화번호</span>
-            <span class="value">
-              ${animal.careTel ? `<a href="tel:${animal.careTel}" style="color:#FF6B35; font-weight:bold; font-size:1.05rem;">📞 ${animal.careTel}</a>` : '정보 없음'}
-            </span>
-          </div>
-          <div class="detail-item">
-            <span class="label">관할 부서</span>
-            <span class="value">${animal.orgNm || '강화군'} (${animal.officetel || animal.chargeNm || '문의'})</span>
-          </div>
+          <div class="detail-item full"><span class="label">보호센터명</span><span class="value" style="font-weight:bold;">${animal.careNm || '강화군 동물보호센터'}</span></div>
+          <div class="detail-item full"><span class="label">보호소 주소</span><span class="value">${animal.careAddr || '인천광역시 강화군'}</span></div>
+          <div class="detail-item"><span class="label">전화번호</span><span class="value">${animal.careTel ? `<a href="tel:${animal.careTel}" style="color:#FF6B35; font-weight:bold; font-size:1.05rem;">📞 ${animal.careTel}</a>` : '정보 없음'}</span></div>
+          <div class="detail-item"><span class="label">관할 부서</span><span class="value">${animal.orgNm || '강화군'} (${animal.officetel || animal.chargeNm || '문의'})</span></div>
         </div>
 
         <a href="https://www.instagram.com/ganghwa_animal_care/" target="_blank" rel="noopener noreferrer" class="insta-brand-link" title="인스타그램으로 이동">
-          <span class="insta-logo-icon" aria-hidden="true">
-            <img src="${SHELTER_LOGO_SRC}" alt="강화군유기동물보호센터 로고">
-          </span>
+          <span class="insta-logo-icon" aria-hidden="true"><img src="${SHELTER_LOGO_SRC}" alt="로고"></span>
           <span class="insta-brand-text">
-            <span class="insta-brand-top">
-              <i class="fab fa-instagram"></i> 인스타그램 방문하기
-            </span>
+            <span class="insta-brand-top"><i class="fab fa-instagram"></i> 인스타그램 방문하기</span>
             <strong class="insta-brand-id">ganghwa_animal_care</strong>
             <span class="insta-brand-name">강화유기동물보호센터</span>
           </span>
@@ -508,7 +491,6 @@ function showDetail(index, options = {}) {
           <pre><code>${escapeHtml(rawJsonString)}</code></pre>
         </div>
       </div>
-
     </div>
   `;
 
@@ -522,7 +504,6 @@ function showDetail(index, options = {}) {
 window.copyDetailLink = async function (index) {
   const animal = allAnimals[index];
   if (!animal) return;
-
   const url = getDetailShareUrl(animal);
   const btn = document.querySelector('.btn-share-link');
 
@@ -531,28 +512,14 @@ window.copyDetailLink = async function (index) {
       await navigator.clipboard.writeText(url);
     } else {
       const ta = document.createElement('textarea');
-      ta.value = url;
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
+      ta.value = url; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
     }
-
     if (btn) {
-      const prev = btn.innerHTML;
-      btn.classList.add('copied');
-      btn.innerHTML = '<i class="fas fa-check"></i> 복사됨!';
-      setTimeout(() => {
-        btn.classList.remove('copied');
-        btn.innerHTML = prev;
-      }, 1800);
+      const prev = btn.innerHTML; btn.classList.add('copied'); btn.innerHTML = '<i class="fas fa-check"></i> 복사됨!';
+      setTimeout(() => { btn.classList.remove('copied'); btn.innerHTML = prev; }, 1800);
     }
-  } catch (err) {
-    console.error('링크 복사 실패:', err);
-    prompt('아래 링크를 복사하세요:', url);
-  }
+  } catch (err) { alert('링크: ' + url); }
 };
 
 window.selectModalImage = function (imgUrl, badgeText, btnElement) {
@@ -564,70 +531,24 @@ window.selectModalImage = function (imgUrl, badgeText, btnElement) {
     mainImg.src = imgUrl;
   }
   if (badge) badge.textContent = badgeText;
-
   document.querySelectorAll('.modal-thumb-btn').forEach(b => b.classList.remove('active'));
   if (btnElement) btnElement.classList.add('active');
 };
 
 window.toggleRawData = function () {
   const box = document.getElementById('rawJsonBox');
-  if (box) {
-    box.style.display = box.style.display === 'none' ? 'block' : 'none';
-  }
+  if (box) box.style.display = box.style.display === 'none' ? 'block' : 'none';
 };
 
 function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function closeModal(options = {}) {
   document.getElementById('modal').style.display = 'none';
   document.body.style.overflow = '';
   isModalOpen = false;
-
-  if (!options.skipHashClear) {
-    setDetailHash('');
-  }
-}
-
-function renderPagination() {
-  const pagination = document.getElementById('pagination');
-  const filtered = getFilteredAnimals();
-  totalPages = Math.ceil(filtered.length / ITEMS_PER_PAGE) || 1;
-
-  if (totalPages <= 1) {
-    pagination.innerHTML = '';
-    return;
-  }
-
-  let html = '';
-  if (currentPage > 1) {
-    html += `<button class="page-btn" onclick="goToPage(${currentPage - 1})"><i class="fas fa-chevron-left"></i></button>`;
-  }
-
-  const startPage = Math.max(1, currentPage - 2);
-  const endPage = Math.min(totalPages, currentPage + 2);
-
-  for (let i = startPage; i <= endPage; i++) {
-    html += `<button class="page-btn ${i === currentPage ? 'active' : ''}" onclick="goToPage(${i})">${i}</button>`;
-  }
-
-  if (currentPage < totalPages) {
-    html += `<button class="page-btn" onclick="goToPage(${currentPage + 1})"><i class="fas fa-chevron-right"></i></button>`;
-  }
-
-  pagination.innerHTML = html;
-}
-
-function goToPage(page) {
-  currentPage = page;
-  renderPage();
-  renderPagination();
-  window.scrollTo({ top: 180, behavior: 'smooth' });
+  if (!options.skipHashClear) setDetailHash('');
 }
 
 function updateStats() {
@@ -638,7 +559,6 @@ function updateStats() {
     else if (kind.includes('고양이')) cats++;
     else etc++;
   });
-
   document.getElementById('totalCount').textContent = allAnimals.length;
   document.getElementById('dogCount').textContent = dogs;
   document.getElementById('catCount').textContent = cats;
