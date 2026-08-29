@@ -1,7 +1,3 @@
-/* ==============================================================
-   🐾 강화군 동물보호센터 - 전체 스타일 (개선판)
-   ============================================================== */
-
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
@@ -30,23 +26,15 @@ body {
   padding: 0 20px;
 }
 
-/* ── 헤더 ─────────────────────────────────── */
 .header {
   background: linear-gradient(135deg, #10B981, #0EA5E9);
   color: white;
   padding: 35px 0;
   text-align: center;
 }
-
-.header-link {
-  text-decoration: none;
-  color: inherit;
-}
-
 .header h1 { font-size: 2rem; margin-bottom: 6px; }
 .header p { font-size: 0.95rem; opacity: 0.95; }
 
-/* ── 필터 ─────────────────────────────────── */
 .filters {
   background: white;
   padding: 18px 0;
@@ -63,10 +51,7 @@ body {
   align-items: flex-end;
 }
 
-.filter-group {
-  flex: 1;
-  min-width: 140px;
-}
+.filter-group { flex: 1; min-width: 140px; }
 
 .filter-group label {
   display: block;
@@ -103,12 +88,9 @@ body {
   font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.2s;
 }
-
 .btn-search:hover { background: var(--primary-dark); }
 
-/* ── 통계 ─────────────────────────────────── */
 .stats { padding: 20px 0; }
 
 .stats-grid {
@@ -125,6 +107,36 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  border: 2px solid transparent;
+  user-select: none;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.stat-card.total.active {
+  border-color: #10B981;
+  background-color: #F0FDF4;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.15);
+}
+.stat-card.dog.active {
+  border-color: #F97316;
+  background-color: #FFF7ED;
+  box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.15);
+}
+.stat-card.cat.active {
+  border-color: #8B5CF6;
+  background-color: #F5F3FF;
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.15);
+}
+.stat-card.etc.active {
+  border-color: #0EA5E9;
+  background-color: #F0F9FF;
+  box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.15);
 }
 
 .stat-card i {
@@ -136,21 +148,19 @@ body {
   justify-content: center;
   border-radius: 10px;
 }
-
 .stat-card.total i { color: #10B981; background: #D1FAE5; }
-.stat-card.dog i   { color: #F97316; background: #FFEDD5; }
-.stat-card.cat i   { color: #8B5CF6; background: #EDE9FE; }
-.stat-card.etc i   { color: #0EA5E9; background: #E0F2FE; }
+.stat-card.dog i { color: #F97316; background: #FFEDD5; }
+.stat-card.cat i { color: #8B5CF6; background: #EDE9FE; }
+.stat-card.etc i { color: #0EA5E9; background: #E0F2FE; }
 
 .stat-number { font-size: 1.5rem; font-weight: 700; display: block; }
-.stat-label  { font-size: 0.8rem; color: var(--text-light); }
+.stat-label { font-size: 0.8rem; color: var(--text-light); }
 
-/* ── 동물 카드 그리드 ───────────────────────── */
 .animals { padding: 15px 0 30px; }
 
 .animal-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 18px;
 }
 
@@ -159,33 +169,28 @@ body {
   border-radius: var(--radius);
   overflow: hidden;
   box-shadow: var(--shadow);
-  transition: transform 0.2s, box-shadow 0.2s;
+  transition: transform 0.2s;
   cursor: pointer;
   display: flex;
   flex-direction: column;
 }
-
 .animal-card:hover {
   transform: translateY(-4px);
   box-shadow: 0 8px 16px rgba(0,0,0,0.1);
 }
 
-/* ── 카드 이미지: 원본 비율 유지 ────────────── */
 .card-image {
   position: relative;
   width: 100%;
-  background: #F1F5F9;
+  height: 180px;
+  background: #E2E8F0;
   overflow: hidden;
 }
-
 .card-image img {
   width: 100%;
-  height: auto;
+  height: 100%;
+  object-fit: cover;
   display: block;
-  min-height: 140px;
-  max-height: 280px;
-  object-fit: contain;
-  background: #F1F5F9;
 }
 
 .photo-count-badge {
@@ -211,9 +216,8 @@ body {
   font-weight: 600;
   color: white;
 }
-
 .badge-protect { background: #10B981; }
-.badge-notice  { background: #F59E0B; }
+.badge-notice { background: #F59E0B; }
 
 .card-kind {
   position: absolute;
@@ -227,11 +231,7 @@ body {
   color: white;
 }
 
-.card-body {
-  padding: 12px;
-  flex: 1;
-}
-
+.card-body { padding: 12px; flex: 1; }
 .card-body h3 {
   font-size: 0.9rem;
   margin-bottom: 8px;
@@ -240,12 +240,7 @@ body {
   text-overflow: ellipsis;
 }
 
-.card-info {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
+.card-info { display: flex; flex-direction: column; gap: 4px; }
 .card-info-item {
   display: flex;
   align-items: center;
@@ -256,7 +251,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
 .card-info-item i { width: 14px; color: var(--primary); font-size: 0.75rem; }
 
 .card-footer {
@@ -266,7 +260,6 @@ body {
   justify-content: space-between;
   align-items: center;
 }
-
 .card-date { font-size: 0.75rem; color: var(--text-light); }
 
 .btn-detail {
@@ -278,12 +271,8 @@ body {
   font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.2s;
 }
 
-.btn-detail:hover { background: var(--primary-dark); }
-
-/* ── 로딩 / 없음 ─────────────────────────── */
 .loading, .no-data {
   text-align: center;
   padding: 60px 0;
@@ -299,12 +288,10 @@ body {
   animation: spin 1s linear infinite;
   margin: 0 auto 15px;
 }
-
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── 페이지네이션 ─────────────────────────── */
 .pagination-section { padding: 0 0 40px; }
-.pagination { display: flex; justify-content: center; gap: 5px; flex-wrap: wrap; }
+.pagination { display: flex; justify-content: center; gap: 5px; }
 
 .page-btn {
   min-width: 36px;
@@ -318,11 +305,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s;
 }
-
-.page-btn:hover { border-color: var(--primary); color: var(--primary); }
-
 .page-btn.active {
   background: var(--primary);
   border-color: var(--primary);
@@ -330,7 +313,7 @@ body {
 }
 
 /* ==============================================================
-   🖼️ 모달 – 멀티 포토 갤러리 + 공유 버튼
+   🖼️ 모달 & 갤러리
    ============================================================== */
 .modal {
   position: fixed;
@@ -346,9 +329,9 @@ body {
 .modal-content {
   background: white;
   border-radius: var(--radius);
-  max-width: 620px;
+  max-width: 720px;
   width: 100%;
-  max-height: 90vh;
+  max-height: 92vh;
   overflow-y: auto;
   position: relative;
 }
@@ -366,22 +349,19 @@ body {
   font-size: 1.2rem;
   cursor: pointer;
   z-index: 30;
-  transition: background 0.2s;
 }
-
-.modal-close:hover { background: rgba(0,0,0,0.85); }
 
 .modal-gallery-wrapper {
   width: 100%;
   background: #0F172A;
 }
 
-/* 모달 대표 이미지: 비율 유지 */
+/* 🎯 대표 이미지: 크게 + 정중앙 */
 .modal-main-image-box {
   position: relative;
   width: 100%;
-  min-height: 200px;
-  max-height: 400px;
+  height: 370px;
+  min-height: 370px;
   background: #0F172A;
   display: flex;
   align-items: center;
@@ -390,12 +370,14 @@ body {
 }
 
 .modal-main-image-box img {
-  width: 100%;
-  height: auto;
-  max-height: 400px;
-  object-fit: contain;
-  background: #0F172A;
   display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center center;
+  margin: 0 auto;
+  border: 0;
+  background: transparent;
 }
 
 .modal-img-badge {
@@ -408,9 +390,10 @@ body {
   padding: 3px 10px;
   border-radius: 12px;
   font-weight: 600;
+  z-index: 2;
+  pointer-events: none;
 }
 
-/* 썸네일 스트립 */
 .modal-thumb-strip {
   display: flex;
   gap: 8px;
@@ -433,14 +416,12 @@ body {
   padding: 0;
   transition: all 0.2s;
 }
-
 .modal-thumb-btn img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
-
 .modal-thumb-btn.active {
   border-color: var(--primary);
   transform: scale(1.05);
@@ -457,9 +438,67 @@ body {
   border-radius: 3px;
 }
 
-/* 모달 상세 */
+@media (max-width: 640px) {
+  .modal-main-image-box {
+    height: 300px;
+    min-height: 300px;
+  }
+}
+
+@media (max-width: 400px) {
+  .modal-main-image-box {
+    height: 240px;
+    min-height: 240px;
+  }
+}
+
 .modal-detail { padding: 22px; }
-.modal-detail h2 { font-size: 1.25rem; margin-bottom: 15px; }
+
+.modal-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.modal-title-row h2 {
+  font-size: 1.25rem;
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.btn-share-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: none;
+  border-radius: 20px;
+  background: #0EA5E9;
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+  box-shadow: 0 2px 4px rgba(14, 165, 233, 0.2);
+}
+
+.btn-share-link:hover {
+  background: #0284C7;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(14, 165, 233, 0.3);
+}
+
+.btn-share-link.copied {
+  background: #10B981;
+  box-shadow: 0 2px 4px rgba(16, 185, 129, 0.2);
+}
 
 .detail-grid {
   display: grid;
@@ -474,71 +513,131 @@ body {
   display: block;
   margin-bottom: 2px;
 }
-
 .detail-item .value { font-size: 0.9rem; }
-.detail-item.full  { grid-column: 1 / -1; }
+.detail-item.full { grid-column: 1 / -1; }
 
+/* ==============================================================
+   🏠 입양 문의처 + 인스타 배너
+   ============================================================== */
 .shelter-info {
-  margin-top: 18px;
-  padding: 15px;
+  margin-top: 20px;
+  padding: 18px 20px;
   background: #F8FAFC;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
 }
 
-.shelter-info h3 { font-size: 1rem; margin-bottom: 12px; color: #0EA5E9; }
-
-/* ── 공유 버튼 바 ─────────────────────────── */
-.share-bar {
-  margin-top: 18px;
+.shelter-title {
+  font-size: 1.05rem;
+  color: #0EA5E9;
+  margin: 0 0 14px 0;
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.btn-share {
-  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  gap: 8px;
+}
+
+.shelter-grid {
+  gap: 14px 12px;
+  margin-bottom: 22px;
+}
+
+.insta-brand-link {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px 12px 12px;
+  background: #fff;
+  border: 1.5px solid var(--border);
+  border-radius: 14px;
+  text-decoration: none;
+  color: var(--text);
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.insta-brand-link:hover {
+  border-color: #E1306C;
+  background: #FFF8FA;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 14px rgba(225, 48, 108, 0.18);
+}
+
+.insta-logo-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+  background: #FFFFFF;
+  border-radius: 12px;
+  border: 1px solid #E2E8F0;
+  overflow: hidden;
+  padding: 4px;
+}
+
+.insta-logo-icon img,
+.insta-logo-icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.insta-brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+  min-width: 0;
+  gap: 3px;
+  flex: 1;
+}
+
+.insta-brand-top {
+  font-size: 0.78rem;
+  color: #64748B;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.insta-brand-top .fa-instagram {
+  color: #E1306C;
+  font-size: 0.95rem;
+}
+
+.insta-brand-id {
+  font-size: 0.98rem;
+  font-weight: 800;
+  color: #1E293B;
+  letter-spacing: -0.02em;
+}
+
+.insta-brand-name {
   font-size: 0.82rem;
+  color: #64748B;
   font-weight: 600;
-  cursor: pointer;
-  background: white;
-  transition: all 0.2s;
 }
 
-.btn-share:hover { background: #F1F5F9; }
-
-.btn-share.link-copy  { color: #10B981; border-color: #10B981; }
-.btn-share.kakao      { color: #FEE500; background: #FEE500; color: #3C1E1E; border-color: #FEE500; }
-.btn-share.twitter    { color: #1DA1F2; border-color: #1DA1F2; }
-
-.share-toast {
-  position: fixed;
-  bottom: 30px;
-  left: 50%;
-  transform: translateX(-50%) translateY(80px);
-  background: #1E293B;
-  color: white;
-  padding: 12px 24px;
-  border-radius: 10px;
-  font-size: 0.9rem;
-  font-weight: 600;
-  z-index: 9999;
-  opacity: 0;
-  transition: all 0.35s ease;
-  pointer-events: none;
+.insta-brand-link:hover .insta-brand-id {
+  color: #E1306C;
 }
 
-.share-toast.show {
-  transform: translateX(-50%) translateY(0);
-  opacity: 1;
+.insta-arrow {
+  color: #CBD5E1;
+  font-size: 1.1rem;
+  transition: color 0.2s ease, transform 0.2s ease;
+  margin-left: 5px;
 }
 
-/* JSON 원본 뷰어 */
+.insta-brand-link:hover .insta-arrow {
+  color: #E1306C;
+  transform: translateX(3px);
+}
+
 .raw-data-section {
   margin-top: 18px;
   border-top: 1px dashed var(--border);
@@ -556,9 +655,7 @@ body {
   color: #475569;
   cursor: pointer;
   text-align: left;
-  transition: background 0.2s;
 }
-
 .btn-toggle-raw:hover { background: #E2E8F0; }
 
 .raw-json-box {
@@ -570,7 +667,6 @@ body {
   max-height: 220px;
   overflow-y: auto;
 }
-
 .raw-json-box pre {
   margin: 0;
   font-family: 'Consolas', 'Courier New', monospace;
@@ -579,22 +675,10 @@ body {
   word-break: break-all;
 }
 
-/* ── 푸터 ─────────────────────────────────── */
 .footer {
   background: #1E293B;
   color: #94A3B8;
   padding: 22px 0;
   text-align: center;
   font-size: 0.85rem;
-}
-
-/* ── 반응형 ───────────────────────────────── */
-@media (max-width: 640px) {
-  .header h1 { font-size: 1.4rem; }
-  .filter-grid { flex-direction: column; }
-  .filter-group { min-width: 100%; }
-  .animal-grid { grid-template-columns: 1fr; }
-  .detail-grid { grid-template-columns: 1fr; }
-  .share-bar { flex-direction: column; }
-  .btn-share { justify-content: center; }
 }
