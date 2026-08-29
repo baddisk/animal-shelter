@@ -487,7 +487,7 @@ function showDetail(index, options = {}) {
 
         <a href="https://www.instagram.com/ganghwa_animal_care/" target="_blank" rel="noopener noreferrer" class="insta-brand-link" title="인스타그램으로 이동">
           <span class="insta-logo-icon" aria-hidden="true">
-            <img src="${SHELTER_LOGO_SRC}" alt="강화군유기동물보호센터 로고" width="72" height="72">
+            <img src="${SHELTER_LOGO_SRC}" alt="강화군유기동물보호센터 로고">
           </span>
           <span class="insta-brand-text">
             <span class="insta-brand-top">
