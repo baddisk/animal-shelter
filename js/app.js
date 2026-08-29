@@ -7,6 +7,14 @@ let currentPage = 1;
 let pendingDetailId = null;
 let isModalOpen = false;
 
+// 🖼️ 모달 이미지 갤러리 상태
+let modalImages = [];
+let modalImageIndex = 0;
+let touchStartX = 0;
+let touchStartY = 0;
+let touchDeltaX = 0;
+let isSwiping = false;
+
 // 이미지 준비중 SVG
 const PLACEHOLDER_SVG = 'data:image/svg+xml,' + encodeURIComponent(
   `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
@@ -56,8 +64,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   setupStatsFilterEvents();
-
-  // 🚀 무한 스크롤 및 Top 버튼 초기화
   setupInfiniteScroll();
   setupTopButton();
 
@@ -67,6 +73,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeModal();
+    if (isModalOpen && modalImages.length > 1) {
+      if (e.key === 'ArrowRight') showModalImageByIndex(modalImageIndex + 1);
+      if (e.key === 'ArrowLeft') showModalImageByIndex(modalImageIndex - 1);
+    }
   });
 
   window.addEventListener('hashchange', handleHashChange);
@@ -83,16 +93,11 @@ function formatDateToYMD(date) {
 // 🔗 딥링크 / 공유 URL
 // ==============================================================
 function getShareId(animalOrNoticeNo) {
-  const raw = typeof animalOrNoticeNo === 'string'
-    ? animalOrNoticeNo
-    : String(animalOrNoticeNo?.noticeNo || '');
-
+  const raw = typeof animalOrNoticeNo === 'string' ? animalOrNoticeNo : String(animalOrNoticeNo?.noticeNo || '');
   let id = raw.trim();
   if (!id) return '';
-
   id = id.replace(/[가-힣]+/g, '');
   id = id.replace(/-+/g, '-').replace(/^-|-$/g, '');
-
   const m = id.match(/(\d{4}-\d+)/);
   if (m) return m[1];
   return id;
@@ -144,12 +149,11 @@ function openDetailByShareId(shareId) {
   const animal = allAnimals[idx];
   const filteredIndex = filtered.indexOf(animal);
   if (filteredIndex >= 0) {
-    // 해당 아이템이 렌더링되지 않았을 수 있으므로 currentPage를 충분히 늘림
     const neededPage = Math.floor(filteredIndex / ITEMS_PER_PAGE) + 1;
     if (neededPage > currentPage) {
-      while(currentPage < neededPage) {
+      while (currentPage < neededPage) {
         currentPage++;
-        renderPage(true); // 누적 렌더링
+        renderPage(true);
       }
     }
   }
@@ -199,12 +203,11 @@ async function searchAnimals() {
 
     allAnimals = result.items || [];
     currentStatsFilter = 'all';
-    currentPage = 1; // 검색 시 첫 페이지로
+    currentPage = 1;
     updateStatsActiveCard();
 
-    renderPage(false); // 새로 그리기
+    renderPage(false);
     updateStats();
-
     tryOpenPendingDetail();
   } catch (error) {
     console.error('데이터 조회 실패:', error);
@@ -242,7 +245,7 @@ function handleStatsFilterChange(filterType) {
   currentStatsFilter = filterType;
   currentPage = 1;
   updateStatsActiveCard();
-  renderPage(false); // 새로 그리기
+  renderPage(false);
 }
 
 function updateStatsActiveCard() {
@@ -259,7 +262,6 @@ function updateStatsActiveCard() {
 
 function extractAllImages(animal) {
   if (!animal) return [];
-
   const list = [];
   const seen = new Set();
 
@@ -295,7 +297,7 @@ function getThumbnailUrl(animal) {
 }
 
 // ==============================================================
-// 🚀 무한 스크롤 및 렌더링
+// 🚀 무한 스크롤 & Top 버튼
 // ==============================================================
 function setupInfiniteScroll() {
   const target = document.createElement('div');
@@ -303,9 +305,7 @@ function setupInfiniteScroll() {
   document.getElementById('animalGrid').insertAdjacentElement('afterend', target);
 
   const observer = new IntersectionObserver((entries) => {
-    if (entries[0].isIntersecting) {
-      loadMoreAnimals();
-    }
+    if (entries[0].isIntersecting) loadMoreAnimals();
   }, { rootMargin: '100px' });
 
   observer.observe(target);
@@ -315,8 +315,24 @@ function loadMoreAnimals() {
   const filtered = getFilteredAnimals();
   if (currentPage * ITEMS_PER_PAGE < filtered.length) {
     currentPage++;
-    renderPage(true); // 기존 목록에 추가(Append)
+    renderPage(true);
   }
+}
+
+function setupTopButton() {
+  const btn = document.createElement('button');
+  btn.id = 'topBtn';
+  btn.className = 'btn-top hidden';
+  btn.innerHTML = '<i class="fas fa-arrow-up"></i>';
+  btn.title = '맨 위로 가기';
+  document.body.appendChild(btn);
+
+  btn.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+
+  window.addEventListener('scroll', () => {
+    if (window.scrollY > 300) btn.classList.remove('hidden');
+    else btn.classList.add('hidden');
+  });
 }
 
 function renderPage(isAppend = false) {
@@ -377,27 +393,95 @@ function renderPage(isAppend = false) {
 }
 
 // ==============================================================
-// ⬆️ Top 버튼 추가
+// 🖼️ 모달 이미지 갤러리 네비게이션 (클릭/스와이프)
 // ==============================================================
-function setupTopButton() {
-  const btn = document.createElement('button');
-  btn.id = 'topBtn';
-  btn.className = 'btn-top hidden';
-  btn.innerHTML = '<i class="fas fa-arrow-up"></i>';
-  btn.title = '맨 위로 가기';
-  document.body.appendChild(btn);
+function setupModalImageNavigation() {
+  const mainBox = document.querySelector('.modal-main-image-box');
+  if (!mainBox) return;
 
-  btn.addEventListener('click', () => {
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  });
+  if (modalImages.length <= 1) {
+    mainBox.classList.remove('has-multiple');
+    return;
+  }
 
-  window.addEventListener('scroll', () => {
-    if (window.scrollY > 300) {
-      btn.classList.remove('hidden');
-    } else {
-      btn.classList.add('hidden');
+  mainBox.classList.add('has-multiple');
+
+  // 🖥 PC: 클릭 시 다음 이미지
+  mainBox.addEventListener('click', () => {
+    if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+      showModalImageByIndex(modalImageIndex + 1);
     }
   });
+
+  // 📱 모바일: 터치 스와이프
+  mainBox.addEventListener('touchstart', onGalleryTouchStart, { passive: true });
+  mainBox.addEventListener('touchmove', onGalleryTouchMove, { passive: false });
+  mainBox.addEventListener('touchend', onGalleryTouchEnd, { passive: true });
+  mainBox.addEventListener('touchcancel', onGalleryTouchEnd, { passive: true });
+}
+
+function onGalleryTouchStart(e) {
+  if (!e.touches || e.touches.length !== 1) return;
+  touchStartX = e.touches[0].clientX;
+  touchStartY = e.touches[0].clientY;
+  touchDeltaX = 0;
+  isSwiping = false;
+}
+
+function onGalleryTouchMove(e) {
+  if (!e.touches || e.touches.length !== 1) return;
+  const dx = e.touches[0].clientX - touchStartX;
+  const dy = e.touches[0].clientY - touchStartY;
+  touchDeltaX = dx;
+
+  if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 8) {
+    isSwiping = true;
+    e.preventDefault();
+  }
+}
+
+function onGalleryTouchEnd() {
+  if (!isSwiping || modalImages.length <= 1) {
+    touchDeltaX = 0;
+    isSwiping = false;
+    return;
+  }
+
+  const threshold = 50;
+  if (touchDeltaX <= -threshold) {
+    showModalImageByIndex(modalImageIndex + 1);
+  } else if (touchDeltaX >= threshold) {
+    showModalImageByIndex(modalImageIndex - 1);
+  }
+
+  touchDeltaX = 0;
+  isSwiping = false;
+}
+
+function showModalImageByIndex(index) {
+  if (!modalImages.length) return;
+  const len = modalImages.length;
+  modalImageIndex = ((index % len) + len) % len;
+
+  const img = modalImages[modalImageIndex];
+  const mainImg = document.getElementById('modalMainImg');
+  const badge = document.getElementById('modalImgBadge');
+
+  if (mainImg) {
+    mainImg.dataset.fallback = '';
+    mainImg.onerror = function () { handleImgError(mainImg); };
+    mainImg.src = img.url;
+  }
+  if (badge) badge.textContent = `${modalImageIndex + 1} / ${len} (${img.key})`;
+
+  document.querySelectorAll('.modal-thumb-btn').forEach((btn, i) => {
+    btn.classList.toggle('active', i === modalImageIndex);
+  });
+
+  const activeThumb = document.querySelector('.modal-thumb-btn.active');
+  if (activeThumb && activeThumb.scrollIntoView) {
+    activeThumb.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+  }
 }
 
 // ==============================================================
@@ -412,6 +496,10 @@ function showDetail(index, options = {}) {
   const kindTitle = formatKind(animal.kindFullNm || animal.kindNm || animal.kindCd);
   const shareId = getShareId(animal);
 
+  // 갤러리 상태 초기화
+  modalImages = images;
+  modalImageIndex = 0;
+
   const noticePeriod = (animal.noticeSdt && animal.noticeEdt)
     ? `${formatDate(animal.noticeSdt)} ~ ${formatDate(animal.noticeEdt)}`
     : '정보 없음';
@@ -420,15 +508,19 @@ function showDetail(index, options = {}) {
   if (images.length > 0) {
     galleryHtml = `
       <div class="modal-gallery-wrapper">
-        <div class="modal-main-image-box">
-          <img id="modalMainImg" src="${images[0].url}" alt="대표 사진" onerror="handleImgError(this)">
-          <span id="modalImgBadge" class="modal-img-badge">1 / ${images.length} (popfile1)</span>
+        <div class="modal-main-image-box${images.length > 1 ? ' has-multiple' : ''}">
+          <img id="modalMainImg" src="${images[0].url}" alt="대표 사진" onerror="handleImgError(this)" draggable="false">
+          <span id="modalImgBadge" class="modal-img-badge">1 / ${images.length} (${images[0].key || 'popfile1'})</span>
+          ${images.length > 1 ? `
+            <div class="modal-nav-hint modal-nav-hint-pc"><i class="fas fa-hand-pointer"></i> 클릭 시 다음 사진</div>
+            <div class="modal-nav-hint modal-nav-hint-mobile"><i class="fas fa-arrows-alt-h"></i> 밀어서 사진 넘기기</div>
+          ` : ''}
         </div>
         ${images.length > 1 ? `
           <div class="modal-thumb-strip">
             ${images.map((img, i) => `
               <button type="button" class="modal-thumb-btn ${i === 0 ? 'active' : ''}" onclick="selectModalImage('${img.url}', '${i + 1} / ${images.length} (${img.key})', this)">
-                <img src="${img.url}" alt="사진 ${i + 1}" onerror="handleImgError(this)">
+                <img src="${img.url}" alt="사진 ${i + 1}" onerror="handleImgError(this)" draggable="false">
                 <span class="thumb-num">${i + 1}</span>
               </button>
             `).join('')}
@@ -494,6 +586,9 @@ function showDetail(index, options = {}) {
     </div>
   `;
 
+  // 🎯 이미지 클릭/스와이프 네비게이션 연결
+  setupModalImageNavigation();
+
   document.getElementById('modal').style.display = 'flex';
   document.body.style.overflow = 'hidden';
   isModalOpen = true;
@@ -523,16 +618,25 @@ window.copyDetailLink = async function (index) {
 };
 
 window.selectModalImage = function (imgUrl, badgeText, btnElement) {
-  const mainImg = document.getElementById('modalMainImg');
-  const badge = document.getElementById('modalImgBadge');
-  if (mainImg) {
-    mainImg.dataset.fallback = '';
-    mainImg.onerror = function () { handleImgError(mainImg); };
-    mainImg.src = imgUrl;
+  let idx = modalImages.findIndex(img => img.url === imgUrl);
+  if (idx < 0 && btnElement) {
+    const thumbs = Array.from(document.querySelectorAll('.modal-thumb-btn'));
+    idx = thumbs.indexOf(btnElement);
   }
-  if (badge) badge.textContent = badgeText;
-  document.querySelectorAll('.modal-thumb-btn').forEach(b => b.classList.remove('active'));
-  if (btnElement) btnElement.classList.add('active');
+  if (idx >= 0) {
+    showModalImageByIndex(idx);
+  } else {
+    const mainImg = document.getElementById('modalMainImg');
+    const badge = document.getElementById('modalImgBadge');
+    if (mainImg) {
+      mainImg.dataset.fallback = '';
+      mainImg.onerror = function () { handleImgError(mainImg); };
+      mainImg.src = imgUrl;
+    }
+    if (badge) badge.textContent = badgeText;
+    document.querySelectorAll('.modal-thumb-btn').forEach(b => b.classList.remove('active'));
+    if (btnElement) btnElement.classList.add('active');
+  }
 };
 
 window.toggleRawData = function () {
@@ -548,6 +652,8 @@ function closeModal(options = {}) {
   document.getElementById('modal').style.display = 'none';
   document.body.style.overflow = '';
   isModalOpen = false;
+  modalImages = [];
+  modalImageIndex = 0;
   if (!options.skipHashClear) setDetailHash('');
 }
 
