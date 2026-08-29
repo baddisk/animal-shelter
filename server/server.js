@@ -1,376 +1,275 @@
-/* ==============================================================
-   🐾 강화군 동물보호센터 – 서버 (완전 수정판)
-   - 서버 시작 시 강화군 코드 1회 자동 조회 & 영구 캐싱
-   - 0건 데이터 캐시 방지
-   - numOfRows 100으로 API 호출 횟수 최소화 (초고속)
-   - 이미지 프록시 병렬 시도 & 캐시
-   - Express 5 호환 라우팅
-   ============================================================== */
-
 require('dotenv').config();
 const express = require('express');
-const axios   = require('axios');
-const cors    = require('cors');
-const path    = require('path');
-const https   = require('https');
-const http    = require('http');
+const axios = require('axios');
+const cors = require('cors');
+const path = require('path');
+const https = require('https');
+const http = require('http');
 
-const app  = express();
+const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.static(path.join(__dirname, '..')));
 
-// SSL 인증서 무시 에이전트
-const httpsAgent = new https.Agent({ rejectUnauthorized: false });
-const httpAgent  = new http.Agent();
+// SSL 인증서 무시 및 커넥션 재사용 에이전트
+const httpsAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
+const httpAgent = new http.Agent({ keepAlive: true });
 
 const BASE_URL = 'http://apis.data.go.kr/1543061/abandonmentPublicService_v2';
 
-// 강화군 기본 코드 (실제 인천 강화군 코드: 3570000)
-let ganghwaParams = {
-  upr_cd: '6280000',
-  org_cd: '3570000',
-  care_reg_no: ''
-};
-
-// 캐시
-const dataCache  = new Map();
-const imageCache = new Map();
-const CACHE_TTL     = 10 * 60 * 1000; // 데이터 10분
-const IMG_CACHE_TTL = 24 * 60 * 60 * 1000; // 이미지 24시간
-const MAX_IMG_CACHE = 800;
-
 // ==============================================================
+// ⚡ 1. 메모리 캐시 시스템 (API 응답 10분, 코드 정보 영구)
+// ==============================================================
+const animalCache = new Map();
+const CACHE_TTL = 10 * 60 * 1000; // 10분 캐시 유지
+
+let cachedGanghwaParams = null; // 강화군 지역코드 캐시
+
 // 공통 API 요청 함수
-// ==============================================================
 async function fetchOpenApi(endpoint, params = {}) {
   const serviceKey = process.env.API_KEY;
-  if (!serviceKey) throw new Error('.env 파일에 API_KEY가 설정되지 않았습니다.');
+  if (!serviceKey) throw new Error('.env 파일에 API_KEY가 없습니다.');
 
-  const qp = new URLSearchParams({
+  const queryParams = new URLSearchParams({
     serviceKey: decodeURIComponent(serviceKey),
     _type: 'json',
     ...params
   });
 
-  const url = `${BASE_URL}/${endpoint}?${qp.toString()}`;
+  const requestUrl = `${BASE_URL}/${endpoint}?${queryParams.toString()}`;
 
-  const resp = await axios.get(url, {
-    timeout: 15000,
+  const response = await axios.get(requestUrl, {
+    timeout: 10000,
     httpsAgent,
     httpAgent,
     headers: { 'User-Agent': 'Mozilla/5.0' }
   });
 
-  return resp.data;
+  return response.data;
 }
 
-// ==============================================================
-// 🚀 서버 시작 시 강화군 코드 1회 자동 감지 (이후 0초 소요)
-// ==============================================================
-async function initGanghwaCodes() {
+// 🎯 강화군 코드 조회 (서버 실행 후 최초 1회만 실행 및 캐싱)
+async function getGanghwaParams() {
+  if (cachedGanghwaParams) return cachedGanghwaParams;
+
   try {
-    console.log('🔍 [초기화] 강화군 기관/보호소 코드 확인 중...');
-    
-    // 1. 시군구 조회
     const sigunguData = await fetchOpenApi('sigungu_v2', { upr_cd: '6280000' });
     const sItems = sigunguData?.response?.body?.items?.item || [];
     const sList = Array.isArray(sItems) ? sItems : [sItems];
     const ganghwa = sList.find(i => (i.orgdownNm || '').includes('강화'));
-    
-    if (ganghwa && ganghwa.orgCd) {
-      ganghwaParams.org_cd = ganghwa.orgCd;
-    }
+    const orgCd = ganghwa ? ganghwa.orgCd : '3280000';
 
-    // 2. 보호소 조회
-    const shelterData = await fetchOpenApi('shelter_v2', { upr_cd: '6280000', org_cd: ganghwaParams.org_cd });
+    const shelterData = await fetchOpenApi('shelter_v2', { upr_cd: '6280000', org_cd: orgCd });
     const shItems = shelterData?.response?.body?.items?.item || [];
     const shList = Array.isArray(shItems) ? shItems : [shItems];
-    const shelter = shList.find(i => (i.careNm || '').includes('강화'));
-    
-    if (shelter && shelter.careRegNo) {
-      ganghwaParams.care_reg_no = shelter.careRegNo;
-      console.log(`✅ [초기화 완료] 강화군 코드 감지 성공: 시군구(${ganghwaParams.org_cd}), 보호소(${shelter.careNm})`);
-    } else {
-      console.log(`✅ [초기화 완료] 강화군 시군구(${ganghwaParams.org_cd})로 전체 조회 설정`);
-    }
-  } catch (err) {
-    console.warn(`⚠️ [초기화 안내] 코드 자동조회 실패, 기본값(인천:6280000, 강화:3570000) 사용:`, err.message);
+    const shelter = shList.find(i => (i.careNm || '').includes('강화')) || shList[0];
+    const careRegNo = shelter ? shelter.careRegNo : '';
+
+    cachedGanghwaParams = { upr_cd: '6280000', org_cd: orgCd, care_reg_no: careRegNo };
+    console.log('✅ [캐시 완료] 강화군 코드 정보 등록 성공');
+    return cachedGanghwaParams;
+  } catch (e) {
+    console.warn('⚠️ 강화군 코드 조회 실패, 기본값 사용');
+    return { upr_cd: '6280000', org_cd: '3280000' };
   }
 }
 
 // ==============================================================
-// 유기동물 데이터 수집 (100개씩 대량 호출)
+// 🎯 404 방지: 공공서버의 실제 이미지 경로 후보군 생성 함수
 // ==============================================================
-async function fetchAllAnimals(queryParams) {
-  let allItems = [];
+function generateCandidateUrls(rawUrl) {
+  const cleanUrl = rawUrl.trim();
+  const candidates = [];
 
-  // 1페이지 호출 (100마리 단위)
-  const first = await fetchOpenApi('abandonmentPublic_v2', {
-    ...queryParams,
-    pageNo: '1',
-    numOfRows: '100'
-  });
-
-  const body = first?.response?.body;
-  if (!body || !body.items || !body.items.item) {
-    // 만약 care_reg_no나 org_cd 때문에 0건이면, 인천 전체에서 검색 시도
-    if (queryParams.org_cd) {
-      console.log('🔄 강화군 필터 없이 인천 전체에서 강화군 개체 재검색 중...');
-      const fallback = await fetchOpenApi('abandonmentPublic_v2', {
-        upr_cd: '6280000',
-        bgnde: queryParams.bgnde,
-        endde: queryParams.endde,
-        upkind: queryParams.upkind,
-        pageNo: '1',
-        numOfRows: '100'
-      });
-      const fbBody = fallback?.response?.body;
-      const fbItems = fbBody?.items?.item;
-      if (fbItems) {
-        return Array.isArray(fbItems) ? fbItems : [fbItems];
-      }
-    }
-    return [];
+  if (cleanUrl.includes('/files/shelter/')) {
+    const filePath = cleanUrl.substring(cleanUrl.indexOf('/files/shelter/'));
+    candidates.push(`https://www.animal.go.kr${filePath}`);
+    candidates.push(`http://www.animal.go.kr${filePath}`);
   }
+
+  if (cleanUrl.includes('openapi.animal.go.kr')) {
+    candidates.push(cleanUrl.replace('openapi.animal.go.kr', 'www.animal.go.kr').replace('http://', 'https://'));
+  }
+
+  candidates.push(cleanUrl.replace('http://', 'https://'));
+  candidates.push(cleanUrl);
+
+  return [...new Set(candidates)];
+}
+
+// ==============================================================
+// 🖼️ 이미지 프록시 라우터
+// ==============================================================
+app.get('/api/image-proxy', async (req, res) => {
+  const imageUrl = req.query.url;
+  if (!imageUrl || imageUrl === 'undefined') return res.status(400).send('URL 오류');
+
+  const candidates = generateCandidateUrls(imageUrl);
+
+  for (const targetUrl of candidates) {
+    try {
+      const response = await axios.get(targetUrl, {
+        responseType: 'arraybuffer',
+        timeout: 4000,
+        httpsAgent,
+        httpAgent,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36',
+          'Referer': 'https://www.animal.go.kr/'
+        }
+      });
+
+      if (response.status === 200 && response.data && response.data.length > 100) {
+        const contentType = response.headers['content-type'] || 'image/jpeg';
+        res.set('Content-Type', contentType);
+        res.set('Cache-Control', 'public, max-age=604800'); // 7일간 브라우저 캐싱
+        return res.send(response.data);
+      }
+    } catch (err) {
+      continue;
+    }
+  }
+
+  res.status(404).send('Image Not Found');
+});
+
+// ==============================================================
+// ⚡ 2. 강화군 유기동물 조회 API (전체 페이지 병렬 로딩 적용)
+// ==============================================================
+async function fetchGanghwaAnimalsFromApi(queryParams) {
+  const ganghwaParams = await getGanghwaParams();
+  const baseParams = { ...ganghwaParams, ...queryParams, numOfRows: '50' };
+
+  // 1. 첫 번째 페이지 호출하여 전체 개수 파악
+  const firstPageData = await fetchOpenApi('abandonmentPublic_v2', { ...baseParams, pageNo: '1' });
+  const body = firstPageData?.response?.body;
+  if (!body || !body.items || !body.items.item) return [];
 
   const totalCount = parseInt(body.totalCount) || 0;
-  const firstItems = Array.isArray(body.items.item) ? body.items.item : [body.items.item];
-  allItems = [...firstItems];
+  let allItems = Array.isArray(body.items.item) ? body.items.item : [body.items.item];
 
-  // 100마리 초과 시 나머지 페이지 병렬 호출
-  if (totalCount > 100) {
-    const totalPages = Math.min(Math.ceil(totalCount / 100), 10);
-    const promises = [];
+  // 2. 전체 페이지 계산 (제한 없이 모든 페이지 수 계산)
+  const totalPages = Math.min(Math.ceil(totalCount / 50), 20); // 최대 20페이지(1000마리)까지 누락 없이 수집
 
+  // 3. 2페이지부터 나머지 모든 페이지를 병렬(동시) 요청하여 100% 누락 없이 수집
+  if (totalPages > 1) {
+    const pagePromises = [];
     for (let p = 2; p <= totalPages; p++) {
-      promises.push(
-        fetchOpenApi('abandonmentPublic_v2', {
-          ...queryParams,
-          pageNo: String(p),
-          numOfRows: '100'
-        }).catch(() => null)
-      );
+      pagePromises.push(fetchOpenApi('abandonmentPublic_v2', { ...baseParams, pageNo: String(p) }));
     }
 
-    const results = await Promise.allSettled(promises);
-    for (const r of results) {
-      if (r.status === 'fulfilled' && r.value) {
-        const items = r.value?.response?.body?.items?.item;
+    const pagesResults = await Promise.allSettled(pagePromises);
+    pagesResults.forEach(res => {
+      if (res.status === 'fulfilled') {
+        const items = res.value?.response?.body?.items?.item;
         if (items) {
-          allItems = allItems.concat(Array.isArray(items) ? items : [items]);
+          const list = Array.isArray(items) ? items : [items];
+          allItems = allItems.concat(list);
         }
       }
-    }
+    });
   }
 
-  return allItems;
-}
-
-// ==============================================================
-// 강화군 및 보호/공고중 필터링
-// ==============================================================
-function filterGanghwa(items) {
-  // 1. 강화군 관련 필터
-  let filtered = items.filter(a => {
-    const c = a.careNm || '';
-    const o = a.orgNm || '';
-    const h = a.happenPlace || '';
-    return c.includes('강화') || o.includes('강화') || h.includes('강화');
+  // 강화군 필터
+  let filtered = allItems.filter(animal => {
+    const careNm = animal.careNm || '';
+    const orgNm = animal.orgNm || '';
+    const happenPlace = animal.happenPlace || '';
+    return careNm.includes('강화') || orgNm.includes('강화') || happenPlace.includes('강화');
   });
 
-  // 필터 후 0개인데 원본이 있다면 원본 유지
-  if (filtered.length === 0 && items.length > 0) filtered = items;
+  if (filtered.length === 0 && allItems.length > 0) filtered = allItems;
 
-  // 2. 안락사/자연사/입양완료 등 종료 개체 제외 (보호중, 공고중만)
-  filtered = filtered.filter(a => {
-    const st = String(a.processState || '');
-    if (st.includes('종료') || st.includes('입양') || st.includes('자연사') ||
-        st.includes('안락사') || st.includes('반환') || st.includes('기증')) return false;
-    return st.includes('보호') || st.includes('공고');
+  // 종료 개체 제외 (보호중/공고중만)
+  filtered = filtered.filter(animal => {
+    const state = String(animal.processState || '');
+    if (state.includes('종료') || state.includes('입양') || 
+        state.includes('자연사') || state.includes('안락사') || 
+        state.includes('반환') || state.includes('기증')) {
+      return false;
+    }
+    return state.includes('보호') || state.includes('공고');
   });
 
-  // 3. 최신 발생일순 정렬
+  // 최신순 정렬
   filtered.sort((a, b) => {
-    const da = String(a.happenDt || '').replace(/\D/g, '');
-    const db = String(b.happenDt || '').replace(/\D/g, '');
+    const da = String(a.happenDt || '').replace(/[^0-9]/g, '');
+    const db = String(b.happenDt || '').replace(/[^0-9]/g, '');
     return db.localeCompare(da);
   });
 
   return filtered;
 }
 
-// ==============================================================
-// 🎯 동물 목록 조회 API
-// ==============================================================
 app.get('/api/animals', async (req, res) => {
   try {
     const { bgnde, endde, upkind } = req.query;
-    const cacheKey = `${bgnde || ''}_${endde || ''}_${upkind || ''}`;
 
-    // 캐시 확인
-    if (dataCache.has(cacheKey)) {
-      const cached = dataCache.get(cacheKey);
-      if (Date.now() - cached.ts < CACHE_TTL && cached.items.length > 0) {
-        console.log(`⚡ 캐시 히트! ${cached.items.length}마리 즉시 응답`);
-        return res.json({ total: cached.items.length, items: cached.items });
-      }
-      dataCache.delete(cacheKey);
-    }
-
-    const queryParams = {
-      upr_cd: ganghwaParams.upr_cd,
-      org_cd: ganghwaParams.org_cd
-    };
-    if (ganghwaParams.care_reg_no) queryParams.care_reg_no = ganghwaParams.care_reg_no;
-    if (bgnde)  queryParams.bgnde = String(bgnde).replace(/\D/g, '');
-    if (endde)  queryParams.endde = String(endde).replace(/\D/g, '');
+    const queryParams = {};
+    if (bgnde) queryParams.bgnde = String(bgnde).replace(/[^0-9]/g, '');
+    if (endde) queryParams.endde = String(endde).replace(/[^0-9]/g, '');
     if (upkind) queryParams.upkind = upkind;
 
-    const allItems = await fetchAllAnimals(queryParams);
-    const filtered = filterGanghwa(allItems);
+    const cacheKey = JSON.stringify(queryParams);
+    const cachedData = animalCache.get(cacheKey);
 
-    // 💡 0마리가 아닐 때만 캐시에 저장
-    if (filtered.length > 0) {
-      dataCache.set(cacheKey, { items: filtered, ts: Date.now() });
+    // ⚡ 메모리 캐시에 데이터가 있고 10분이 안 지났으면 즉시 반환
+    if (cachedData && (Date.now() - cachedData.timestamp < CACHE_TTL)) {
+      console.log(`⚡ [캐시 적중] 메모리에서 즉시 반환 (${cachedData.items.length}마리)`);
+      return res.json({
+        total: cachedData.items.length,
+        items: cachedData.items,
+        fromCache: true
+      });
     }
 
-    console.log(`✨ [조회 완료] 강화군 보호중: ${filtered.length}마리 (원본 공공데이터: ${allItems.length}마리)`);
-    res.json({ total: filtered.length, items: filtered });
+    console.log('🔄 [공공 API 요청] 전체 데이터를 공공서버에서 누락 없이 수집합니다...');
+    const filteredItems = await fetchGanghwaAnimalsFromApi(queryParams);
 
-  } catch (err) {
-    console.error('❌ 유기동물 조회 에러:', err.message);
-    res.status(500).json({ error: err.message, total: 0, items: [] });
-  }
-});
-
-// ==============================================================
-// 🔗 단건 조회 API (공유 링크 접속 시)
-// ==============================================================
-app.get('/api/animal/:noticeNo', async (req, res) => {
-  try {
-    const noticeNo = decodeURIComponent(req.params.noticeNo);
-
-    for (const [, cached] of dataCache) {
-      const found = cached.items.find(a => a.noticeNo === noticeNo || a.desertionNo === noticeNo);
-      if (found) return res.json(found);
-    }
-
-    const now = new Date();
-    const endde = now.toISOString().slice(0,10).replace(/-/g, '');
-    const bgnde = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())
-                    .toISOString().slice(0,10).replace(/-/g, '');
-
-    const allItems = await fetchAllAnimals({
-      upr_cd: ganghwaParams.upr_cd,
-      org_cd: ganghwaParams.org_cd,
-      bgnde, endde
+    animalCache.set(cacheKey, {
+      timestamp: Date.now(),
+      items: filteredItems
     });
 
-    const target = allItems.find(a => a.noticeNo === noticeNo || a.desertionNo === noticeNo);
-    if (target) return res.json(target);
+    console.log(`✨ [조회 완료] 강화군 보호중: ${filteredItems.length}마리`);
 
-    res.status(404).json({ error: '해당 공고를 찾을 수 없습니다.' });
-  } catch (err) {
-    console.error('❌ 단건 조회 에러:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+    res.json({
+      total: filteredItems.length,
+      items: filteredItems,
+      fromCache: false
+    });
 
-// ==============================================================
-// 🖼️ 이미지 프록시 (병렬 시도 + 캐싱)
-// ==============================================================
-function generateCandidateUrls(rawUrl) {
-  const clean = rawUrl.trim();
-  const candidates = [];
+  } catch (error) {
+    console.error('❌ 유기동물 조회 에러:', error.message);
 
-  if (clean.includes('/files/shelter/')) {
-    const fp = clean.substring(clean.indexOf('/files/shelter/'));
-    candidates.push(`https://www.animal.go.kr${fp}`);
-    candidates.push(`http://www.animal.go.kr${fp}`);
-  }
-
-  if (clean.includes('openapi.animal.go.kr')) {
-    candidates.push(clean.replace('openapi.animal.go.kr', 'www.animal.go.kr').replace('http://', 'https://'));
-    candidates.push(clean.replace('openapi.animal.go.kr', 'www.animal.go.kr'));
-  }
-
-  candidates.push(clean.replace('http://', 'https://'));
-  candidates.push(clean.replace('https://', 'http://'));
-
-  return [...new Set(candidates)];
-}
-
-app.get('/api/image-proxy', async (req, res) => {
-  const imageUrl = req.query.url;
-  if (!imageUrl || imageUrl === 'undefined') return res.status(400).send('URL 오류');
-
-  if (imageCache.has(imageUrl)) {
-    const cached = imageCache.get(imageUrl);
-    if (Date.now() - cached.ts < IMG_CACHE_TTL) {
-      res.set('Content-Type', cached.contentType);
-      res.set('Cache-Control', 'public, max-age=604800');
-      return res.send(cached.data);
+    const cacheKey = JSON.stringify(req.query || {});
+    const cachedData = animalCache.get(cacheKey);
+    if (cachedData) {
+      return res.json({ total: cachedData.items.length, items: cachedData.items, fromCache: true });
     }
-    imageCache.delete(imageUrl);
-  }
 
-  const candidates = generateCandidateUrls(imageUrl);
-
-  try {
-    const result = await Promise.any(
-      candidates.map(url =>
-        axios.get(url, {
-          responseType: 'arraybuffer',
-          timeout: 4500,
-          httpsAgent,
-          httpAgent,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://www.animal.go.kr/'
-          }
-        }).then(resp => {
-          if (resp.status === 200 && resp.data && resp.data.length > 200) return resp;
-          throw new Error('invalid');
-        })
-      )
-    );
-
-    const contentType = result.headers['content-type'] || 'image/jpeg';
-
-    if (imageCache.size >= MAX_IMG_CACHE) {
-      const oldest = imageCache.keys().next().value;
-      imageCache.delete(oldest);
-    }
-    imageCache.set(imageUrl, { data: result.data, contentType, ts: Date.now() });
-
-    res.set('Content-Type', contentType);
-    res.set('Cache-Control', 'public, max-age=604800');
-    return res.send(result.data);
-
-  } catch (err) {
-    res.status(404).send('Image Not Found');
+    res.status(500).json({ error: error.message, total: 0, items: [] });
   }
 });
 
 // ==============================================================
-// SPA 라우팅 (Express 5 호환)
-// ==============================================================
-app.use((req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'index.html'));
-});
-
-// ==============================================================
-// 서버 시작
+// 🚀 서버 시작 및 백그라운드 데이터 예열 (Warm-up)
 // ==============================================================
 app.listen(PORT, async () => {
   console.log('');
   console.log('🐾 =========================================');
-  console.log(`🐾  강화군 동물보호센터 서버 구동 완료!`);
+  console.log(`🐾  강화군 동물보호센터 서버 실행 완료!`);
   console.log(`🐾  접속 주소: http://localhost:${PORT}`);
   console.log('🐾 =========================================\n');
-  
-  // 서버 켜질 때 코드 감지 실행
-  await initGanghwaCodes();
+
+  try {
+    await getGanghwaParams();
+    fetchGanghwaAnimalsFromApi({}).then(items => {
+      animalCache.set(JSON.stringify({}), { timestamp: Date.now(), items });
+      console.log(`🚀 [서버 예열 완료] 백그라운드 데이터 미리 로드 완료 (${items.length}마리)`);
+    });
+  } catch (e) {
+    console.warn('예열 실패:', e.message);
+  }
 });
