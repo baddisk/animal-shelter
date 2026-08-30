@@ -96,45 +96,40 @@ body {
 .btn-top.hidden { opacity: 0; visibility: hidden; transform: translateY(20px); }
 .btn-top:hover { background: var(--primary-dark); transform: translateY(-3px); }
 
-/* ==============================================================
-   🖼️ 모달
-   ============================================================== */
+/* 모달 */
 .modal { position: fixed; inset: 0; width: 100%; height: 100%; height: 100dvh; background: rgba(0,0,0,0.65); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 15px; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .modal-content { background: white; border-radius: var(--radius); max-width: 720px; width: 100%; max-height: min(92vh, 92dvh); overflow-x: hidden; overflow-y: auto; position: relative; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; box-shadow: 0 20px 40px rgba(0,0,0,0.25); }
 .modal-close { position: absolute; top: 10px; right: 10px; width: 36px; height: 36px; border: none; background: rgba(0,0,0,0.6); color: white; border-radius: 50%; font-size: 1.2rem; cursor: pointer; z-index: 30; display: flex; align-items: center; justify-content: center; touch-action: manipulation; }
 
 .modal-gallery-wrapper { width: 100%; background: #0F172A; }
 
-/* 대표 이미지 (클릭/스와이프 지원) */
 .modal-main-image-box {
   position: relative; width: 100%; height: min(420px, 52vh); min-height: 240px;
   background: #0F172A; display: flex; align-items: center; justify-content: center;
-  overflow: hidden;
-  user-select: none; -webkit-user-select: none;
-  touch-action: pan-y;
+  overflow: hidden; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  touch-action: pan-y; cursor: default;
 }
-.modal-main-image-box.has-multiple { cursor: pointer; }
+.modal-main-image-box.has-multiple { cursor: pointer; touch-action: none; }
+.modal-main-image-box.is-swiping { cursor: grabbing; }
 .modal-main-image-box img {
   display: block; width: 100%; height: 100%; max-width: 100%;
   object-fit: contain; object-position: center center; margin: 0 auto;
   border: 0; background: transparent;
-  pointer-events: none; -webkit-user-drag: none;
+  pointer-events: none; -webkit-user-drag: none; user-select: none;
+  will-change: transform, opacity;
 }
 .modal-img-badge { position: absolute; top: 12px; left: 12px; background: rgba(0, 0, 0, 0.7); color: #F8FAFC; font-size: 0.75rem; padding: 3px 10px; border-radius: 12px; font-weight: 600; z-index: 2; pointer-events: none; }
 
-/* 네비게이션 힌트 */
 .modal-nav-hint {
   position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
   background: rgba(15, 23, 42, 0.72); color: #F8FAFC;
   font-size: 0.72rem; font-weight: 600;
   padding: 5px 12px; border-radius: 16px;
   z-index: 3; pointer-events: none; white-space: nowrap;
-  opacity: 0.9;
   animation: hintFade 4s ease forwards;
 }
 .modal-nav-hint-mobile { display: none; }
 .modal-nav-hint-pc { display: none; }
-
 @media (hover: hover) and (pointer: fine) {
   .modal-main-image-box.has-multiple .modal-nav-hint-pc { display: block; }
 }
@@ -142,7 +137,6 @@ body {
   .modal-main-image-box.has-multiple .modal-nav-hint-mobile { display: block; }
   .modal-main-image-box.has-multiple .modal-nav-hint-pc { display: none; }
 }
-
 @keyframes hintFade {
   0%, 60% { opacity: 0.9; }
   100% { opacity: 0; visibility: hidden; }
@@ -155,7 +149,33 @@ body {
 .modal-thumb-btn.active { border-color: var(--primary); transform: scale(1.05); }
 .thumb-num { position: absolute; bottom: 2px; right: 2px; background: rgba(0, 0, 0, 0.7); color: white; font-size: 0.65rem; padding: 1px 4px; border-radius: 3px; }
 
-/* 상세 정보 */
+/* 원본/크롤링 뱃지 */
+.modal-thumb-btn.is-origin { border-color: #0EA5E9; }
+.modal-thumb-btn.is-extra { border-color: #F59E0B; }
+.modal-thumb-btn.is-origin.active,
+.modal-thumb-btn.is-extra.active { border-color: var(--primary); }
+
+.thumb-origin-badge {
+  position: absolute; top: 2px; left: 2px;
+  background: #0EA5E9; color: #fff;
+  font-size: 0.55rem; font-weight: bold;
+  width: 14px; height: 14px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; line-height: 1;
+}
+.thumb-extra-badge {
+  position: absolute; top: 2px; left: 2px;
+  background: #F59E0B; color: #fff;
+  font-size: 0.55rem; font-weight: bold;
+  width: 14px; height: 14px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; line-height: 1;
+}
+
+/* 🙈 이미지 URL 디버그 박스 완전 숨김 */
+.image-urls-debug {
+  display: none !important;
+}
+
+/* 상세 텍스트 */
 .modal-detail { padding: 22px; padding-bottom: calc(22px + env(safe-area-inset-bottom, 0px)); }
 .modal-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .modal-title-row h2 { font-size: 1.25rem; margin: 0; flex: 1; min-width: 0; line-height: 1.35; word-break: keep-all; overflow-wrap: anywhere; }
@@ -168,7 +188,7 @@ body {
 .detail-item .value { font-size: 0.9rem; word-break: keep-all; overflow-wrap: anywhere; }
 .detail-item.full { grid-column: 1 / -1; }
 
-/* 입양 문의처 & 인스타 */
+/* 입양 문의처 */
 .shelter-info { margin-top: 20px; padding: 18px 20px; background: #F8FAFC; border: 1px solid var(--border); border-radius: 12px; }
 .shelter-title { font-size: 1.05rem; color: #0EA5E9; margin: 0 0 14px 0; display: flex; align-items: center; gap: 8px; }
 .shelter-grid { gap: 14px 12px; margin-bottom: 22px; }
@@ -185,28 +205,17 @@ body {
 .insta-arrow { color: #CBD5E1; font-size: 1.1rem; transition: color 0.2s ease, transform 0.2s ease; margin-left: 5px; flex-shrink: 0; }
 .insta-brand-link:hover .insta-arrow { color: #E1306C; transform: translateX(3px); }
 
-/* 원본 JSON */
-.raw-data-section { margin-top: 18px; border-top: 1px dashed var(--border); padding-top: 15px; }
-.btn-toggle-raw { width: 100%; padding: 8px 12px; background: #F1F5F9; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem; font-weight: 600; color: #475569; cursor: pointer; text-align: left; }
-.btn-toggle-raw:hover { background: #E2E8F0; }
-.raw-json-box { margin-top: 8px; background: #0F172A; color: #38BDF8; padding: 12px; border-radius: 8px; max-height: 220px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-.raw-json-box pre { margin: 0; font-family: 'Consolas', 'Courier New', monospace; font-size: 0.75rem; white-space: pre-wrap; word-break: break-all; }
-
 /* 푸터 */
 .footer { background: #1E293B; color: #94A3B8; padding: 22px 0; text-align: center; font-size: 0.85rem; }
 
-/* ==============================================================
-   📱 태블릿 이하
-   ============================================================== */
+/* 반응형 */
 @media (max-width: 768px) {
   .header { padding: 28px 0; }
   .header h1 { font-size: 1.55rem; }
   .header p { font-size: 0.88rem; padding: 0 8px; }
   .container { padding: 0 14px; }
 
-  /* 모바일 검색조건 고정 해제 */
   .filters { position: static; }
-
   .btn-top { bottom: 20px; right: 20px; width: 44px; height: 44px; font-size: 1.1rem; }
   .filter-group { min-width: 120px; }
   .animal-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
@@ -220,9 +229,6 @@ body {
   .modal-close { top: 8px; right: 8px; width: 40px; height: 40px; }
 }
 
-/* ==============================================================
-   📱 모바일
-   ============================================================== */
 @media (max-width: 480px) {
   .header h1 { font-size: 1.35rem; }
   .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
@@ -258,7 +264,6 @@ body {
   .insta-brand-id { font-size: 0.88rem; }
   .insta-brand-name { font-size: 0.74rem; }
   .insta-arrow { font-size: 0.95rem; }
-  .raw-data-section { margin-top: 14px; padding-top: 12px; }
 }
 
 @media (max-width: 360px) {
@@ -269,7 +274,6 @@ body {
   .insta-brand-id { font-size: 0.8rem; }
 }
 
-/* 가로 모드 모바일 */
 @media (max-height: 500px) and (orientation: landscape) {
   .modal { align-items: stretch; padding: 0; }
   .modal-content { height: 100dvh; max-height: 100dvh; border-radius: 0; display: flex; flex-direction: column; }
