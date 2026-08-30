@@ -1,5 +1,6 @@
 const API_BASE = '/api';
 const ITEMS_PER_PAGE = 20;
+const MAX_GALLERY_IMAGES = 16;
 
 let allAnimals = [];
 let currentStatsFilter = 'all';
@@ -7,18 +8,17 @@ let currentPage = 1;
 let pendingDetailId = null;
 let isModalOpen = false;
 
-// 🖼️ 모달 이미지 갤러리 상태
 let modalImages = [];
 let modalImageIndex = 0;
+let extraImagesCache = new Map();
+let currentDetailIndex = -1;
 
-// 스와이프/드래그 상태
 let pointerStartX = 0;
 let pointerStartY = 0;
 let pointerDeltaX = 0;
 let pointerDeltaY = 0;
 let pointerActive = false;
-let swipeLocked = null; // 'h' | 'v' | null
-let galleryNavBound = false;
+let swipeLocked = null;
 
 const PLACEHOLDER_SVG = 'data:image/svg+xml,' + encodeURIComponent(
   `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
@@ -39,31 +39,24 @@ window.handleImgError = function (img) {
 
 document.addEventListener('DOMContentLoaded', () => {
   const now = new Date();
-  const endStr = formatDateToYMD(now);
-  const oneYearBefore = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
-  const bgnStr = formatDateToYMD(oneYearBefore);
-
-  document.getElementById('endde').value = endStr;
-  document.getElementById('bgnde').value = bgnStr;
+  document.getElementById('endde').value = formatDateToYMD(now);
+  document.getElementById('bgnde').value = formatDateToYMD(
+    new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())
+  );
 
   pendingDetailId = parseDetailHash();
-  searchAnimals();
+  searchAnimals(false);
 
   document.getElementById('searchBtn').addEventListener('click', () => {
     currentPage = 1;
-    searchAnimals();
+    searchAnimals(true);
   });
-  document.getElementById('upkind').addEventListener('change', () => {
-    currentPage = 1;
-    searchAnimals();
-  });
-  document.getElementById('bgnde').addEventListener('change', () => {
-    currentPage = 1;
-    searchAnimals();
-  });
-  document.getElementById('endde').addEventListener('change', () => {
-    currentPage = 1;
-    searchAnimals();
+  
+  ['upkind', 'bgnde', 'endde'].forEach((id) => {
+    document.getElementById(id).addEventListener('change', () => {
+      currentPage = 1;
+      searchAnimals(false);
+    });
   });
 
   setupStatsFilterEvents();
@@ -74,7 +67,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('modal').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeModal();
   });
-
+  
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeModal();
     if (isModalOpen && modalImages.length > 1) {
@@ -82,7 +75,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (e.key === 'ArrowLeft') showModalImageByIndex(modalImageIndex - 1);
     }
   });
-
+  
   window.addEventListener('hashchange', handleHashChange);
 });
 
@@ -93,17 +86,25 @@ function formatDateToYMD(date) {
   return `${y}-${m}-${d}`;
 }
 
+function setSearchBtnLoading(isLoading) {
+  const btn = document.getElementById('searchBtn');
+  if (!btn) return;
+  if (isLoading) {
+    btn.disabled = true;
+    btn.dataset.prevHtml = btn.innerHTML;
+    btn.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> 새로고침 중...';
+  } else {
+    btn.disabled = false;
+    if (btn.dataset.prevHtml) btn.innerHTML = btn.dataset.prevHtml;
+  }
+}
+
 // ==============================================================
-// 🔗 딥링크 / 공유 URL
+// 🔗 딥링크
 // ==============================================================
 function getShareId(animalOrNoticeNo) {
-  const raw = typeof animalOrNoticeNo === 'string'
-    ? animalOrNoticeNo
-    : String(animalOrNoticeNo?.noticeNo || '');
-  let id = raw.trim();
-  if (!id) return '';
-  id = id.replace(/[가-힣]+/g, '');
-  id = id.replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const raw = typeof animalOrNoticeNo === 'string' ? animalOrNoticeNo : String(animalOrNoticeNo?.noticeNo || '');
+  let id = raw.trim().replace(/[가-힣]+/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '');
   const m = id.match(/(\d{4}-\d+)/);
   if (m) return m[1];
   return id;
@@ -116,8 +117,7 @@ function getDetailShareUrl(animal) {
 }
 
 function parseDetailHash() {
-  const hash = window.location.hash || '';
-  const m = hash.match(/^#detail\/([^/?#]+)/i);
+  const m = (window.location.hash || '').match(/^#detail\/([^/?#]+)/i);
   if (!m) return null;
   try {
     return decodeURIComponent(m[1]).trim();
@@ -133,24 +133,17 @@ function setDetailHash(shareId) {
   else history.replaceState(null, '', window.location.pathname + window.location.search);
 }
 
-function findAnimalIndexByShareId(shareId) {
-  if (!shareId) return -1;
-  const target = String(shareId).trim().toLowerCase();
-  return allAnimals.findIndex(a => {
-    const id = getShareId(a).toLowerCase();
-    if (!id) return false;
-    return id === target || id.endsWith(target) || target.endsWith(id);
-  });
-}
-
 function openDetailByShareId(shareId) {
   if (!shareId) return false;
-  const idx = findAnimalIndexByShareId(shareId);
+  const target = String(shareId).trim().toLowerCase();
+  const idx = allAnimals.findIndex(a => {
+    const id = getShareId(a).toLowerCase();
+    return id && (id === target || id.endsWith(target) || target.endsWith(id));
+  });
   if (idx < 0) return false;
 
   const filtered = getFilteredAnimals();
-  const animal = allAnimals[idx];
-  const filteredIndex = filtered.indexOf(animal);
+  const filteredIndex = filtered.indexOf(allAnimals[idx]);
   if (filteredIndex >= 0) {
     const neededPage = Math.floor(filteredIndex / ITEMS_PER_PAGE) + 1;
     while (currentPage < neededPage) {
@@ -158,57 +151,49 @@ function openDetailByShareId(shareId) {
       renderPage(true);
     }
   }
-
-  showDetail(idx, { fromHash: true });
+  showDetail(idx);
   return true;
 }
 
 function handleHashChange() {
   const id = parseDetailHash();
   if (id) {
-    if (allAnimals.length === 0) {
-      pendingDetailId = id;
-      return;
-    }
-    openDetailByShareId(id);
+    if (allAnimals.length === 0) pendingDetailId = id;
+    else openDetailByShareId(id);
   } else if (isModalOpen) {
     closeModal({ skipHashClear: true });
   }
 }
 
-function tryOpenPendingDetail() {
-  if (!pendingDetailId) return;
-  const id = pendingDetailId;
-  pendingDetailId = null;
-  openDetailByShareId(id);
-}
-
-// ==============================================================
-// 데이터 조회
-// ==============================================================
-async function searchAnimals() {
+async function searchAnimals(forceRefresh = false) {
   showLoading(true);
+  if (forceRefresh) setSearchBtnLoading(true);
 
   const bgnde = document.getElementById('bgnde').value;
   const endde = document.getElementById('endde').value;
   const upkind = document.getElementById('upkind').value;
-
-  const params = new URLSearchParams();
-  if (bgnde) params.append('bgnde', bgnde);
-  if (endde) params.append('endde', endde);
-  if (upkind) params.append('upkind', upkind);
+  const params = new URLSearchParams({ bgnde, endde, upkind });
+  if (forceRefresh) params.append('refresh', '1');
 
   try {
-    const response = await fetch(`${API_BASE}/animals?${params}`);
+    const response = await fetch(`${API_BASE}/animals?${params}`, {
+      cache: forceRefresh ? 'no-store' : 'default'
+    });
     const result = await response.json();
-
+    
     allAnimals = result.items || [];
     currentStatsFilter = 'all';
     currentPage = 1;
+    
     updateStatsActiveCard();
     renderPage(false);
     updateStats();
-    tryOpenPendingDetail();
+    
+    if (pendingDetailId) {
+      openDetailByShareId(pendingDetailId);
+      pendingDetailId = null;
+    }
+    if (forceRefresh) extraImagesCache.clear();
   } catch (error) {
     console.error('데이터 조회 실패:', error);
     allAnimals = [];
@@ -216,6 +201,7 @@ async function searchAnimals() {
   }
 
   showLoading(false);
+  if (forceRefresh) setSearchBtnLoading(false);
 }
 
 function getFilteredAnimals() {
@@ -230,73 +216,129 @@ function getFilteredAnimals() {
 }
 
 function setupStatsFilterEvents() {
-  const totalCard = document.querySelector('.stat-card.total');
-  const dogCard = document.querySelector('.stat-card.dog');
-  const catCard = document.querySelector('.stat-card.cat');
-  const etcCard = document.querySelector('.stat-card.etc');
-
-  if (totalCard) totalCard.addEventListener('click', () => handleStatsFilterChange('all'));
-  if (dogCard) dogCard.addEventListener('click', () => handleStatsFilterChange('dog'));
-  if (catCard) catCard.addEventListener('click', () => handleStatsFilterChange('cat'));
-  if (etcCard) etcCard.addEventListener('click', () => handleStatsFilterChange('etc'));
-}
-
-function handleStatsFilterChange(filterType) {
-  currentStatsFilter = filterType;
-  currentPage = 1;
-  updateStatsActiveCard();
-  renderPage(false);
+  ['total', 'dog', 'cat', 'etc'].forEach(type => {
+    const el = document.querySelector(`.stat-card.${type}`);
+    if (el) {
+      el.addEventListener('click', () => {
+        currentStatsFilter = type === 'total' ? 'all' : type;
+        currentPage = 1;
+        updateStatsActiveCard();
+        renderPage(false);
+      });
+    }
+  });
 }
 
 function updateStatsActiveCard() {
   document.querySelectorAll('.stat-card').forEach(card => card.classList.remove('active'));
-  let targetSelector = '.stat-card.total';
-  if (currentStatsFilter === 'dog') targetSelector = '.stat-card.dog';
-  else if (currentStatsFilter === 'cat') targetSelector = '.stat-card.cat';
-  else if (currentStatsFilter === 'etc') targetSelector = '.stat-card.etc';
-  const activeCard = document.querySelector(targetSelector);
+  const sel = currentStatsFilter === 'all' ? '.stat-card.total' : `.stat-card.${currentStatsFilter}`;
+  const activeCard = document.querySelector(sel);
   if (activeCard) activeCard.classList.add('active');
+}
+
+// ==============================================================
+// 🖼️ 이미지 중복 제거 및 수집
+// ==============================================================
+function getFilenameFromUrl(url) {
+  if (!url) return '';
+  const s = String(url);
+  if (/f_seq=/i.test(s) || /f_id=/i.test(s)) {
+    const id = (s.match(/f_id=(\d+)/i) || [])[1] || '';
+    const seq = (s.match(/f_seq=(\d+)/i) || [])[1] || '';
+    return `fid${id}_seq${seq}`.toLowerCase();
+  }
+  try {
+    return decodeURIComponent(s.split('/').pop().split('?')[0]).toLowerCase();
+  } catch {
+    return (s.split('/').pop() || '').toLowerCase();
+  }
+}
+
+function getDesertionNo(animal) {
+  if (!animal) return '';
+  return String(
+    animal.desertionNo || animal.desertionNO || animal.DesertionNo || animal.desertionno || ''
+  ).trim();
 }
 
 function extractAllImages(animal) {
   if (!animal) return [];
   const list = [];
-  const seen = new Set();
+  
+  const push = (raw, key) => {
+    if (!raw || typeof raw !== 'string') return;
+    const cleanUrl = raw.trim();
+    if (!/^https?:\/\//i.test(cleanUrl)) return;
+    
+    list.push({
+      key,
+      url: `${API_BASE}/image-proxy?url=${encodeURIComponent(cleanUrl)}`,
+      rawUrl: cleanUrl,
+      filename: getFilenameFromUrl(cleanUrl),
+      isExtra: false,
+      listLabel: `원본${list.length + 1}`
+    });
+  };
 
   for (let i = 1; i <= 10; i++) {
-    const key = `popfile${i}`;
-    const val = animal[key] || animal[`popFile${i}`];
-    if (val && typeof val === 'string' && val.trim().startsWith('http')) {
-      const cleanUrl = val.trim();
-      if (!seen.has(cleanUrl)) {
-        seen.add(cleanUrl);
-        list.push({
-          num: i,
-          key,
-          url: `${API_BASE}/image-proxy?url=${encodeURIComponent(cleanUrl)}`,
-          rawUrl: cleanUrl
-        });
+    for (const k of [`popfile${i}`, `popFile${i}`, `POPFILE${i}`]) {
+      if (animal[k]) {
+        push(animal[k], `popfile${i}`);
+        break;
       }
     }
   }
 
-  ['popfile', 'popFile', 'filename', 'fileName'].forEach((gk) => {
-    const val = animal[gk];
-    if (val && typeof val === 'string' && val.trim().startsWith('http')) {
-      const cleanUrl = val.trim();
-      if (!seen.has(cleanUrl)) {
-        seen.add(cleanUrl);
-        list.push({
-          num: list.length + 1,
-          key: gk,
-          url: `${API_BASE}/image-proxy?url=${encodeURIComponent(cleanUrl)}`,
-          rawUrl: cleanUrl
-        });
-      }
-    }
+  return list.map((img, i) => ({ ...img, num: i + 1, listLabel: `원본${i + 1}` }));
+}
+
+function mergeAllImagesSmart(baseImages, extraRawUrls) {
+  const merged = [];
+  const seenFilenames = new Set();
+
+  (baseImages || []).forEach((img, idx) => {
+    const fn = img.filename || getFilenameFromUrl(img.rawUrl);
+    if (fn) seenFilenames.add(fn);
+    merged.push({ ...img, num: merged.length + 1, isExtra: false, listLabel: `원본${idx + 1}` });
   });
 
-  return list;
+  let crawlNo = 0;
+  (Array.isArray(extraRawUrls) ? extraRawUrls : []).forEach((rawUrl, idx) => {
+    let clean = String(rawUrl || '').trim();
+    if (!clean) return;
+
+    const fn = getFilenameFromUrl(clean);
+    if (fn && seenFilenames.has(fn)) return; // 원본 중복 무시
+    if (fn) seenFilenames.add(fn);
+
+    crawlNo++;
+    merged.push({
+      num: merged.length + 1,
+      key: `crawl${idx + 1}`,
+      url: `${API_BASE}/image-proxy?url=${encodeURIComponent(clean)}`,
+      rawUrl: clean,
+      filename: fn,
+      isExtra: true,
+      listLabel: `크롤링${crawlNo}`
+    });
+  });
+
+  return merged.slice(0, MAX_GALLERY_IMAGES).map((img, i) => ({ ...img, num: i + 1 }));
+}
+
+async function fetchExtraImages(desertionNo) {
+  if (!desertionNo) return [];
+  const key = String(desertionNo);
+  const q = new URLSearchParams({ desertionNo: key, refresh: '1' });
+  try {
+    const response = await fetch(`${API_BASE}/detail-images?${q}`, { cache: 'no-store' });
+    const result = await response.json();
+    const images = Array.isArray(result.images) ? result.images : [];
+    extraImagesCache.set(key, images);
+    return images;
+  } catch (err) {
+    return [];
+  }
 }
 
 function getThumbnailUrl(animal) {
@@ -304,41 +346,28 @@ function getThumbnailUrl(animal) {
   return images.length > 0 ? images[0].url : PLACEHOLDER_SVG;
 }
 
-// ==============================================================
-// 무한 스크롤 & Top
-// ==============================================================
 function setupInfiniteScroll() {
   const target = document.createElement('div');
   target.id = 'scrollAnchor';
   document.getElementById('animalGrid').insertAdjacentElement('afterend', target);
-
-  const observer = new IntersectionObserver((entries) => {
+  new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting) loadMoreAnimals();
-  }, { rootMargin: '100px' });
-
-  observer.observe(target);
+  }, { rootMargin: '100px' }).observe(target);
 }
 
 function loadMoreAnimals() {
-  const filtered = getFilteredAnimals();
-  if (currentPage * ITEMS_PER_PAGE < filtered.length) {
-    currentPage++;
-    renderPage(true);
+  if (currentPage * ITEMS_PER_PAGE < getFilteredAnimals().length) {
+    currentPage++; renderPage(true);
   }
 }
 
 function setupTopButton() {
   const btn = document.createElement('button');
-  btn.id = 'topBtn';
-  btn.className = 'btn-top hidden';
-  btn.innerHTML = '<i class="fas fa-arrow-up"></i>';
-  btn.title = '맨 위로 가기';
+  btn.id = 'topBtn'; btn.className = 'btn-top hidden'; btn.innerHTML = '<i class="fas fa-arrow-up"></i>';
   document.body.appendChild(btn);
-
   btn.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
   window.addEventListener('scroll', () => {
-    if (window.scrollY > 300) btn.classList.remove('hidden');
-    else btn.classList.add('hidden');
+    btn.classList.toggle('hidden', window.scrollY <= 300);
   });
 }
 
@@ -348,11 +377,8 @@ function renderPage(isAppend = false) {
   const filtered = getFilteredAnimals();
 
   if (filtered.length === 0) {
-    grid.innerHTML = '';
-    noData.style.display = 'block';
-    return;
+    grid.innerHTML = ''; noData.style.display = 'block'; return;
   }
-
   noData.style.display = 'none';
 
   const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
@@ -366,7 +392,6 @@ function renderPage(isAppend = false) {
     const imgSrc = getThumbnailUrl(animal);
     const stateText = (animal.processState || '').includes('공고') ? '📢 공고중' : '🏠 보호중';
     const stateClass = (animal.processState || '').includes('공고') ? 'badge-notice' : 'badge-protect';
-    const imgCount = extractAllImages(animal).length;
 
     return `
       <div class="animal-card" onclick="showDetail(${realIndex})">
@@ -374,13 +399,12 @@ function renderPage(isAppend = false) {
           <img src="${imgSrc}" alt="${kindText}" loading="lazy" onerror="handleImgError(this)">
           <span class="card-badge ${stateClass}">${stateText}</span>
           <span class="card-kind">${kindText}</span>
-          ${imgCount > 1 ? `<span class="photo-count-badge"><i class="fas fa-camera"></i> ${imgCount}장</span>` : ''}
         </div>
         <div class="card-body">
           <h3>${animal.noticeNo || '공고번호 미상'}</h3>
           <div class="card-info">
-            <div class="card-info-item"><i class="fas fa-map-marker-alt"></i><span>${animal.happenPlace || '강화군 일대'}</span></div>
-            <div class="card-info-item"><i class="fas fa-palette"></i><span>${animal.colorCd || '색상미상'} · ${animal.age || '나이미상'}</span></div>
+            <div class="card-info-item"><i class="fas fa-map-marker-alt"></i><span>${animal.happenPlace || '일대'}</span></div>
+            <div class="card-info-item"><i class="fas fa-palette"></i><span>${animal.colorCd || '미상'} · ${animal.age || '미상'}</span></div>
             <div class="card-info-item"><i class="fas fa-venus-mars"></i><span>${sexNeuter}</span></div>
           </div>
         </div>
@@ -396,258 +420,135 @@ function renderPage(isAppend = false) {
   else grid.innerHTML = html;
 }
 
-// ==============================================================
-// 🖼️ 갤러리: PC 클릭 / 모바일 스와이프 (Pointer Events)
-// ==============================================================
-function isFinePointer() {
-  return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
-}
-
 function setupModalImageNavigation() {
   const mainBox = document.querySelector('.modal-main-image-box');
   if (!mainBox) return;
-
-  // 사진 1장 이하면 제스처 비활성
-  if (modalImages.length <= 1) {
-    mainBox.classList.remove('has-multiple');
-    mainBox.style.touchAction = '';
-    return;
-  }
+  if (modalImages.length <= 1) { mainBox.classList.remove('has-multiple'); mainBox.style.touchAction = ''; return; }
 
   mainBox.classList.add('has-multiple');
-  // 가로 스와이프를 브라우저 스크롤에 뺏기지 않도록
   mainBox.style.touchAction = 'none';
 
-  // 중복 바인딩 방지: 노드 교체 후 재바인딩
   const fresh = mainBox.cloneNode(true);
   mainBox.parentNode.replaceChild(fresh, mainBox);
+  const imgEl = fresh.querySelector('img'); if (imgEl) imgEl.id = 'modalMainImg';
+  const badgeEl = fresh.querySelector('.modal-img-badge'); if (badgeEl) badgeEl.id = 'modalImgBadge';
 
-  // clone 후 id 유지
-  const imgEl = fresh.querySelector('img');
-  if (imgEl) imgEl.id = 'modalMainImg';
-  const badgeEl = fresh.querySelector('.modal-img-badge');
-  if (badgeEl) badgeEl.id = 'modalImgBadge';
-
-  // PC 클릭 → 다음 장
   fresh.addEventListener('click', (e) => {
-    if (!isFinePointer()) return; // 모바일 클릭(탭)은 스와이프로만 처리
-    if (Math.abs(pointerDeltaX) > 10) return; // 드래그 직후 클릭 무시
-    e.preventDefault();
-    showModalImageByIndex(modalImageIndex + 1);
+    if (window.matchMedia('(hover: hover) and (pointer: fine)').matches && Math.abs(pointerDeltaX) <= 10) {
+      e.preventDefault(); showModalImageByIndex(modalImageIndex + 1);
+    }
   });
 
-  // Pointer Events (터치/펜/마우스 통합) — 모바일 스와이프 핵심
   fresh.addEventListener('pointerdown', onGalleryPointerDown);
   fresh.addEventListener('pointermove', onGalleryPointerMove);
   fresh.addEventListener('pointerup', onGalleryPointerUp);
   fresh.addEventListener('pointercancel', onGalleryPointerUp);
-  fresh.addEventListener('pointerleave', (e) => {
-    if (pointerActive) onGalleryPointerUp(e);
-  });
-
-  // iOS 구형 fallback touch 이벤트도 함께
-  fresh.addEventListener('touchstart', onGalleryTouchStartFallback, { passive: false });
-  fresh.addEventListener('touchmove', onGalleryTouchMoveFallback, { passive: false });
-  fresh.addEventListener('touchend', onGalleryTouchEndFallback, { passive: false });
-  fresh.addEventListener('touchcancel', onGalleryTouchEndFallback, { passive: false });
 }
 
 function onGalleryPointerDown(e) {
-  if (modalImages.length <= 1) return;
-  // 마우스 왼쪽만 / 터치는 모두
-  if (e.pointerType === 'mouse' && e.button !== 0) return;
-
-  pointerActive = true;
-  swipeLocked = null;
-  pointerStartX = e.clientX;
-  pointerStartY = e.clientY;
-  pointerDeltaX = 0;
-  pointerDeltaY = 0;
-
-  try {
-    e.currentTarget.setPointerCapture(e.pointerId);
-  } catch (_) {}
-
+  if (modalImages.length <= 1 || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  pointerActive = true; swipeLocked = null; pointerStartX = e.clientX; pointerStartY = e.clientY; pointerDeltaX = 0; pointerDeltaY = 0;
+  try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
   e.currentTarget.classList.add('is-swiping');
 }
 
 function onGalleryPointerMove(e) {
-  if (!pointerActive || modalImages.length <= 1) return;
-
-  pointerDeltaX = e.clientX - pointerStartX;
-  pointerDeltaY = e.clientY - pointerStartY;
-
-  if (!swipeLocked) {
-    if (Math.abs(pointerDeltaX) > 8 || Math.abs(pointerDeltaY) > 8) {
-      swipeLocked = Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY) ? 'h' : 'v';
-    }
-  }
-
-  // 가로 스와이프 확정 시 기본 스크롤/제스처 차단
+  if (!pointerActive) return;
+  pointerDeltaX = e.clientX - pointerStartX; pointerDeltaY = e.clientY - pointerStartY;
+  if (!swipeLocked && (Math.abs(pointerDeltaX) > 8 || Math.abs(pointerDeltaY) > 8)) swipeLocked = Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY) ? 'h' : 'v';
+  
   if (swipeLocked === 'h') {
     e.preventDefault();
     const img = document.getElementById('modalMainImg');
-    if (img) {
-      img.style.transition = 'none';
-      img.style.transform = `translateX(${pointerDeltaX * 0.35}px)`;
-      img.style.opacity = String(Math.max(0.55, 1 - Math.abs(pointerDeltaX) / 400));
-    }
+    if (img) { img.style.transition = 'none'; img.style.transform = `translateX(${pointerDeltaX * 0.35}px)`; }
   }
 }
 
 function onGalleryPointerUp(e) {
   if (!pointerActive) return;
   pointerActive = false;
-
-  const box = e.currentTarget;
-  if (box && box.classList) box.classList.remove('is-swiping');
-
-  const img = document.getElementById('modalMainImg');
-  if (img) {
-    img.style.transition = 'transform 0.2s ease, opacity 0.2s ease';
-    img.style.transform = '';
-    img.style.opacity = '';
-  }
-
-  const threshold = Math.min(60, Math.max(40, window.innerWidth * 0.12));
-  const horizontal = swipeLocked === 'h' || Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY);
-
-  if (horizontal && Math.abs(pointerDeltaX) >= threshold) {
-    if (pointerDeltaX < 0) showModalImageByIndex(modalImageIndex + 1); // 왼쪽 밀기 → 다음
-    else showModalImageByIndex(modalImageIndex - 1); // 오른쪽 밀기 → 이전
-  }
-
-  // 다음 click 오동작 방지용 짧은 쿨다운
-  setTimeout(() => {
-    pointerDeltaX = 0;
-    pointerDeltaY = 0;
-    swipeLocked = null;
-  }, 50);
-
-  try {
-    if (e.pointerId != null) box.releasePointerCapture(e.pointerId);
-  } catch (_) {}
-}
-
-// ---- iOS 등 Pointer 미지원/불안정 대비 Touch fallback ----
-function onGalleryTouchStartFallback(e) {
-  if (window.PointerEvent) return; // Pointer 있으면 중복 방지
-  if (!e.touches || e.touches.length !== 1 || modalImages.length <= 1) return;
-  const t = e.touches[0];
-  pointerActive = true;
-  swipeLocked = null;
-  pointerStartX = t.clientX;
-  pointerStartY = t.clientY;
-  pointerDeltaX = 0;
-  pointerDeltaY = 0;
-  e.currentTarget.classList.add('is-swiping');
-}
-
-function onGalleryTouchMoveFallback(e) {
-  if (window.PointerEvent) return;
-  if (!pointerActive || !e.touches || e.touches.length !== 1) return;
-  const t = e.touches[0];
-  pointerDeltaX = t.clientX - pointerStartX;
-  pointerDeltaY = t.clientY - pointerStartY;
-
-  if (!swipeLocked && (Math.abs(pointerDeltaX) > 8 || Math.abs(pointerDeltaY) > 8)) {
-    swipeLocked = Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY) ? 'h' : 'v';
-  }
-
-  if (swipeLocked === 'h') {
-    e.preventDefault();
-    const img = document.getElementById('modalMainImg');
-    if (img) {
-      img.style.transition = 'none';
-      img.style.transform = `translateX(${pointerDeltaX * 0.35}px)`;
-      img.style.opacity = String(Math.max(0.55, 1 - Math.abs(pointerDeltaX) / 400));
-    }
-  }
-}
-
-function onGalleryTouchEndFallback(e) {
-  if (window.PointerEvent) return;
-  if (!pointerActive) return;
-  pointerActive = false;
   e.currentTarget.classList.remove('is-swiping');
-
+  
   const img = document.getElementById('modalMainImg');
-  if (img) {
-    img.style.transition = 'transform 0.2s ease, opacity 0.2s ease';
-    img.style.transform = '';
-    img.style.opacity = '';
-  }
+  if (img) { img.style.transition = 'transform 0.2s ease'; img.style.transform = ''; }
 
-  const threshold = Math.min(60, Math.max(40, window.innerWidth * 0.12));
   const horizontal = swipeLocked === 'h' || Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY);
-  if (horizontal && Math.abs(pointerDeltaX) >= threshold) {
+  if (horizontal && Math.abs(pointerDeltaX) >= 40) {
     if (pointerDeltaX < 0) showModalImageByIndex(modalImageIndex + 1);
     else showModalImageByIndex(modalImageIndex - 1);
   }
-
-  pointerDeltaX = 0;
-  pointerDeltaY = 0;
-  swipeLocked = null;
+  setTimeout(() => { pointerDeltaX = 0; pointerDeltaY = 0; swipeLocked = null; }, 50);
+  try { if (e.pointerId != null) e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
 }
 
 function showModalImageByIndex(index) {
   if (!modalImages.length) return;
-  const len = modalImages.length;
-  modalImageIndex = ((index % len) + len) % len;
-
+  modalImageIndex = ((index % modalImages.length) + modalImages.length) % modalImages.length;
   const imgData = modalImages[modalImageIndex];
   const mainImg = document.getElementById('modalMainImg');
   const badge = document.getElementById('modalImgBadge');
 
-  if (mainImg) {
-    mainImg.dataset.fallback = '';
-    mainImg.style.transition = 'none';
-    mainImg.style.transform = '';
-    mainImg.style.opacity = '1';
-    mainImg.onerror = function () { handleImgError(mainImg); };
-    mainImg.src = imgData.url;
-  }
-  if (badge) badge.textContent = `${modalImageIndex + 1} / ${len} (${imgData.key})`;
+  if (mainImg) { mainImg.dataset.fallback = ''; mainImg.style.transition = 'none'; mainImg.style.transform = ''; mainImg.onerror = function () { handleImgError(mainImg); }; mainImg.src = imgData.url; }
+  if (badge) badge.textContent = `${modalImageIndex + 1} / ${modalImages.length} (${imgData.listLabel || imgData.key})`;
 
-  document.querySelectorAll('.modal-thumb-btn').forEach((btn, i) => {
-    btn.classList.toggle('active', i === modalImageIndex);
-  });
-
+  document.querySelectorAll('.modal-thumb-btn').forEach((btn, i) => btn.classList.toggle('active', i === modalImageIndex));
   const activeThumb = document.querySelector('.modal-thumb-btn.active');
-  if (activeThumb && activeThumb.scrollIntoView) {
-    activeThumb.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
-  }
+  if (activeThumb && activeThumb.scrollIntoView) activeThumb.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
 }
 
 // ==============================================================
-// 상세 모달
+// 🎯 상세 모달
 // ==============================================================
-function showDetail(index) {
+async function showDetail(index) {
   const animal = allAnimals[index];
   if (!animal) return;
 
+  currentDetailIndex = index;
+
   const stateText = (animal.processState || '').includes('공고') ? '📢 공고중' : '🏠 보호중';
-  const images = extractAllImages(animal);
+  const baseImages = extractAllImages(animal);
   const kindTitle = formatKind(animal.kindFullNm || animal.kindNm || animal.kindCd);
   const shareId = getShareId(animal);
+  const desertionNo = getDesertionNo(animal);
 
-  modalImages = images;
-  modalImageIndex = 0;
-  pointerActive = false;
-  swipeLocked = null;
-  pointerDeltaX = 0;
+  modalImages = mergeAllImagesSmart(baseImages, []);
+  modalImageIndex = 0; pointerActive = false; swipeLocked = null; pointerDeltaX = 0;
 
-  const noticePeriod = (animal.noticeSdt && animal.noticeEdt)
-    ? `${formatDate(animal.noticeSdt)} ~ ${formatDate(animal.noticeEdt)}`
-    : '정보 없음';
+  const noticePeriod = (animal.noticeSdt && animal.noticeEdt) ? `${formatDate(animal.noticeSdt)} ~ ${formatDate(animal.noticeEdt)}` : '정보 없음';
+
+  renderModalContent(animal, index, kindTitle, stateText, noticePeriod);
+  document.getElementById('modal').style.display = 'flex';
+  document.body.style.overflow = 'hidden';
+  isModalOpen = true;
+  if (shareId) setDetailHash(shareId);
+
+  if (desertionNo) {
+    const extraUrls = await fetchExtraImages(desertionNo);
+    
+    if (!isModalOpen || currentDetailIndex !== index) return;
+
+    const merged = mergeAllImagesSmart(baseImages, extraUrls);
+    
+    modalImages = merged;
+    modalImageIndex = 0;
+    
+    renderModalContent(animal, index, kindTitle, stateText, noticePeriod);
+  }
+}
+
+function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
+  const images = modalImages;
+  const safeIndex = Math.min(modalImageIndex, Math.max(0, images.length - 1));
+  modalImageIndex = safeIndex;
 
   let galleryHtml = '';
   if (images.length > 0) {
+    const cur = images[safeIndex];
     galleryHtml = `
       <div class="modal-gallery-wrapper">
         <div class="modal-main-image-box${images.length > 1 ? ' has-multiple' : ''}">
-          <img id="modalMainImg" src="${images[0].url}" alt="대표 사진" onerror="handleImgError(this)" draggable="false">
-          <span id="modalImgBadge" class="modal-img-badge">1 / ${images.length} (${images[0].key || 'popfile1'})</span>
+          <img id="modalMainImg" src="${cur.url}" alt="대표 사진" onerror="handleImgError(this)" draggable="false">
+          <span id="modalImgBadge" class="modal-img-badge">${safeIndex + 1} / ${images.length} (${cur.listLabel || cur.key})</span>
           ${images.length > 1 ? `
             <div class="modal-nav-hint modal-nav-hint-pc"><i class="fas fa-hand-pointer"></i> 클릭 시 다음 사진</div>
             <div class="modal-nav-hint modal-nav-hint-mobile"><i class="fas fa-arrows-alt-h"></i> 밀어서 사진 넘기기</div>
@@ -656,10 +557,13 @@ function showDetail(index) {
         ${images.length > 1 ? `
           <div class="modal-thumb-strip">
             ${images.map((img, i) => `
-              <button type="button" class="modal-thumb-btn ${i === 0 ? 'active' : ''}"
-                onclick="event.stopPropagation(); selectModalImage('${img.url}', '${i + 1} / ${images.length} (${img.key})', this)">
-                <img src="${img.url}" alt="사진 ${i + 1}" onerror="handleImgError(this)" draggable="false">
+              <button type="button"
+                class="modal-thumb-btn ${i === safeIndex ? 'active' : ''} ${img.isExtra ? 'is-extra' : 'is-origin'}"
+                onclick="event.stopPropagation(); selectModalImage(${i})"
+                title="${img.listLabel || img.key}">
+                <img src="${img.url}" alt="${i + 1}" onerror="handleImgError(this)" draggable="false">
                 <span class="thumb-num">${i + 1}</span>
+                ${img.isExtra ? '<span class="thumb-extra-badge">C</span>' : '<span class="thumb-origin-badge">J</span>'}
               </button>
             `).join('')}
           </div>
@@ -670,16 +574,13 @@ function showDetail(index) {
     galleryHtml = `<div class="modal-gallery-wrapper"><div class="modal-main-image-box"><img src="${PLACEHOLDER_SVG}" alt="사진 미등록"></div></div>`;
   }
 
-  const rawJsonString = JSON.stringify(animal, null, 2);
-
+  // 💡 노란색 URL 디버그 박스는 제거된 상태로 깔끔하게 렌더링
   document.getElementById('modalBody').innerHTML = `
     ${galleryHtml}
     <div class="modal-detail">
       <div class="modal-title-row">
         <h2>${animal.noticeNo || '공고'} (${kindTitle})</h2>
-        <button type="button" class="btn-share-link" onclick="copyDetailLink(${index})" title="상세 링크 복사">
-          <i class="fas fa-link"></i> 링크 복사
-        </button>
+        <button type="button" class="btn-share-link" onclick="copyDetailLink(${index})"><i class="fas fa-link"></i> 링크 복사</button>
       </div>
 
       <div class="detail-grid">
@@ -712,26 +613,14 @@ function showDetail(index) {
           <i class="fas fa-chevron-right insta-arrow"></i>
         </a>
       </div>
-
-      <div class="raw-data-section">
-        <button type="button" class="btn-toggle-raw" onclick="toggleRawData()">
-          <i class="fas fa-code"></i> 공공데이터 원본 데이터(JSON) 확인 ▾
-        </button>
-        <div id="rawJsonBox" class="raw-json-box" style="display:none;">
-          <pre><code>${escapeHtml(rawJsonString)}</code></pre>
-        </div>
-      </div>
     </div>
   `;
-
-  // 이미지 제스처 바인딩 (DOM 삽입 직후)
   setupModalImageNavigation();
-
-  document.getElementById('modal').style.display = 'flex';
-  document.body.style.overflow = 'hidden';
-  isModalOpen = true;
-  if (shareId) setDetailHash(shareId);
 }
+
+window.selectModalImage = function (idx) {
+  if (typeof idx === 'number' && idx >= 0 && idx < modalImages.length) showModalImageByIndex(idx);
+};
 
 window.copyDetailLink = async function (index) {
   const animal = allAnimals[index];
@@ -739,70 +628,20 @@ window.copyDetailLink = async function (index) {
   const url = getDetailShareUrl(animal);
   const btn = document.querySelector('.btn-share-link');
   try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(url);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = url;
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
+    if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(url);
+    else {
+      const ta = document.createElement('textarea'); ta.value = url; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
     }
-    if (btn) {
-      const prev = btn.innerHTML;
-      btn.classList.add('copied');
-      btn.innerHTML = '<i class="fas fa-check"></i> 복사됨!';
-      setTimeout(() => {
-        btn.classList.remove('copied');
-        btn.innerHTML = prev;
-      }, 1800);
-    }
-  } catch (err) {
-    alert('링크: ' + url);
-  }
+    if (btn) { const prev = btn.innerHTML; btn.classList.add('copied'); btn.innerHTML = '<i class="fas fa-check"></i> 복사됨!'; setTimeout(() => { btn.innerHTML = prev; }, 1800); }
+  } catch (_) { alert('링크: ' + url); }
 };
-
-window.selectModalImage = function (imgUrl, badgeText, btnElement) {
-  let idx = modalImages.findIndex(img => img.url === imgUrl);
-  if (idx < 0 && btnElement) {
-    const thumbs = Array.from(document.querySelectorAll('.modal-thumb-btn'));
-    idx = thumbs.indexOf(btnElement);
-  }
-  if (idx >= 0) showModalImageByIndex(idx);
-  else {
-    const mainImg = document.getElementById('modalMainImg');
-    const badge = document.getElementById('modalImgBadge');
-    if (mainImg) {
-      mainImg.dataset.fallback = '';
-      mainImg.onerror = function () { handleImgError(mainImg); };
-      mainImg.src = imgUrl;
-    }
-    if (badge) badge.textContent = badgeText;
-    document.querySelectorAll('.modal-thumb-btn').forEach(b => b.classList.remove('active'));
-    if (btnElement) btnElement.classList.add('active');
-  }
-};
-
-window.toggleRawData = function () {
-  const box = document.getElementById('rawJsonBox');
-  if (box) box.style.display = box.style.display === 'none' ? 'block' : 'none';
-};
-
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
 
 function closeModal(options = {}) {
   document.getElementById('modal').style.display = 'none';
   document.body.style.overflow = '';
   isModalOpen = false;
+  currentDetailIndex = -1;
   modalImages = [];
   modalImageIndex = 0;
   pointerActive = false;
@@ -825,10 +664,7 @@ function updateStats() {
 
 function showLoading(show) {
   document.getElementById('loading').style.display = show ? 'block' : 'none';
-  if (show) {
-    document.getElementById('animalGrid').innerHTML = '';
-    document.getElementById('noData').style.display = 'none';
-  }
+  if (show) { document.getElementById('animalGrid').innerHTML = ''; document.getElementById('noData').style.display = 'none'; }
 }
 
 function formatDate(d) {
