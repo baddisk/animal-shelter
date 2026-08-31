@@ -155,20 +155,21 @@ body {
 .modal-thumb-btn.is-origin.active,
 .modal-thumb-btn.is-extra.active { border-color: var(--primary); }
 
-/*.thumb-origin-badge {
+.thumb-origin-badge {
   position: absolute; top: 2px; left: 2px;
   background: #0EA5E9; color: #fff;
   font-size: 0.55rem; font-weight: bold;
   width: 14px; height: 14px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center; line-height: 1;
-}*/
-/*.thumb-extra-badge {
+}
+.thumb-extra-badge {
   position: absolute; top: 2px; left: 2px;
   background: #F59E0B; color: #fff;
   font-size: 0.55rem; font-weight: bold;
   width: 14px; height: 14px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center; line-height: 1;
-}*/
+}
+
 /* ❌ J / C 뱃지 숨김 */
 .thumb-origin-badge,
 .thumb-extra-badge {
@@ -179,7 +180,6 @@ body {
 .thumb-num {
   display: none !important;
 }
-
 
 /* 🙈 이미지 URL 디버그 박스 완전 숨김 */
 .image-urls-debug {
