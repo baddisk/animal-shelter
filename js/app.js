@@ -4,6 +4,7 @@ const MAX_GALLERY_IMAGES = 16;
 
 let allAnimals = [];
 let currentStatsFilter = 'all';
+let currentStatusFilter = 'all';   // all | foster | adopting | news
 let currentPage = 1;
 let pendingDetailId = null;
 let isModalOpen = false;
@@ -12,6 +13,8 @@ let modalImages = [];
 let modalImageIndex = 0;
 let extraImagesCache = new Map();
 let currentDetailIndex = -1;
+let currentLogs = null;            // 상세 모달의 케어 로그 (null = 로딩중)
+const logsCache = new Map();
 
 let pointerStartX = 0;
 let pointerStartY = 0;
@@ -29,6 +32,47 @@ const PLACEHOLDER_SVG = 'data:image/svg+xml,' + encodeURIComponent(
 );
 
 const SHELTER_LOGO_SRC = 'logo.svg';
+
+// ==============================================================
+// 🆕 상태 오버레이 + 케어 타임라인
+// ==============================================================
+const CUSTOM_STATUS = {
+  foster:   { label: '🏡 임시보호중', cls: 'badge-foster',   color: '#8B5CF6' },
+  adopting: { label: '🤝 입양진행중', cls: 'badge-adopting', color: '#EC4899' }
+};
+
+const LOG_TYPES = {
+  notice:   { label: '공고',      icon: '📢', color: '#F59E0B' },
+  intake:   { label: '입소',      icon: '📍', color: '#0EA5E9' },
+  medical:  { label: '치료',      icon: '💉', color: '#EF4444' },
+  surgery:  { label: '수술',      icon: '🏥', color: '#8B5CF6' },
+  vaccine:  { label: '접종·예방', icon: '🛡️', color: '#10B981' },
+  care:     { label: '케어·일상', icon: '🐾', color: '#64748B' },
+  foster:   { label: '임시보호',  icon: '🏡', color: '#F97316' },
+  adopting: { label: '입양 진행', icon: '🤝', color: '#EC4899' },
+  note:     { label: '소식',      icon: '📝', color: '#14B8A6' }
+};
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// 로컬 경로(/img, /uploads)는 프록시 없이, 절대 URL은 이미지 프록시로
+function photoSrc(p) {
+  const s = String(p || '');
+  return s.startsWith('/') ? s : `${API_BASE}/image-proxy?url=${encodeURIComponent(s)}`;
+}
+
+// 카드/상세 뱃지: 보호소가 지정한 상태(foster/adopting)가 API 상태보다 우선
+function badgeFor(animal) {
+  if (animal.customStatus && CUSTOM_STATUS[animal.customStatus]) {
+    const m = CUSTOM_STATUS[animal.customStatus];
+    return { text: m.label, cls: m.cls, color: m.color };
+  }
+  return (animal.processState || '').includes('공고')
+    ? { text: '📢 공고중', cls: 'badge-notice', color: '#F59E0B' }
+    : { text: '🏠 보호중', cls: 'badge-protect', color: '#10B981' };
+}
 
 window.handleImgError = function (img) {
   if (!img || img.dataset.fallback === '1') return;
@@ -60,6 +104,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   setupStatsFilterEvents();
+  setupStatusFilterEvents();
   setupInfiniteScroll();
   setupTopButton();
 
@@ -183,11 +228,15 @@ async function searchAnimals(forceRefresh = false) {
     
     allAnimals = result.items || [];
     currentStatsFilter = 'all';
+    currentStatusFilter = 'all';
     currentPage = 1;
     
     updateStatsActiveCard();
+    const chips = document.getElementById('statusFilter');
+    if (chips) chips.querySelectorAll('.status-chip').forEach((c) => c.classList.toggle('active', c.dataset.status === 'all'));
     renderPage(false);
     updateStats();
+    updateStatusChips();
     
     if (pendingDetailId) {
       openDetailByShareId(pendingDetailId);
@@ -205,14 +254,19 @@ async function searchAnimals(forceRefresh = false) {
 }
 
 function getFilteredAnimals() {
-  if (currentStatsFilter === 'all') return allAnimals;
-  return allAnimals.filter(animal => {
-    const kind = animal.kindFullNm || animal.kindNm || animal.kindCd || '';
-    if (currentStatsFilter === 'dog') return kind.includes('개');
-    if (currentStatsFilter === 'cat') return kind.includes('고양이');
-    if (currentStatsFilter === 'etc') return !kind.includes('개') && !kind.includes('고양이');
-    return true;
+  let list = allAnimals;
+  if (currentStatsFilter === 'dog') list = list.filter(a => (a.kindFullNm || a.kindNm || a.kindCd || '').includes('개'));
+  else if (currentStatsFilter === 'cat') list = list.filter(a => (a.kindFullNm || a.kindNm || a.kindCd || '').includes('고양이'));
+  else if (currentStatsFilter === 'etc') list = list.filter(a => {
+    const kind = a.kindFullNm || a.kindNm || a.kindCd || '';
+    return !kind.includes('개') && !kind.includes('고양이');
   });
+  if (currentStatusFilter === 'foster' || currentStatusFilter === 'adopting') {
+    list = list.filter(a => a.customStatus === currentStatusFilter);
+  } else if (currentStatusFilter === 'news') {
+    list = list.filter(a => (a.logCount || 0) > 0);
+  }
+  return list;
 }
 
 function setupStatsFilterEvents() {
@@ -226,6 +280,33 @@ function setupStatsFilterEvents() {
         renderPage(false);
       });
     }
+  });
+}
+
+function setupStatusFilterEvents() {
+  const wrap = document.getElementById('statusFilter');
+  if (!wrap) return;
+  wrap.querySelectorAll('.status-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      currentStatusFilter = chip.dataset.status || 'all';
+      currentPage = 1;
+      wrap.querySelectorAll('.status-chip').forEach((c) => c.classList.toggle('active', c === chip));
+      renderPage(false);
+    });
+  });
+}
+
+function updateStatusChips() {
+  const counts = { all: allAnimals.length, foster: 0, adopting: 0, news: 0 };
+  allAnimals.forEach((a) => {
+    if (a.customStatus === 'foster') counts.foster++;
+    if (a.customStatus === 'adopting') counts.adopting++;
+    if ((a.logCount || 0) > 0) counts.news++;
+  });
+  const map = { all: 'cntAll', foster: 'cntFoster', adopting: 'cntAdopting', news: 'cntNews' };
+  Object.entries(map).forEach(([key, id]) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = counts[key];
   });
 }
 
@@ -268,11 +349,18 @@ function extractAllImages(animal) {
   const push = (raw, key) => {
     if (!raw || typeof raw !== 'string') return;
     const cleanUrl = raw.trim();
-    if (!/^https?:\/\//i.test(cleanUrl)) return;
+    
+    let proxied = null;
+    if (/^https?:\/\//i.test(cleanUrl)) {
+      proxied = `${API_BASE}/image-proxy?url=${encodeURIComponent(cleanUrl)}`;
+    } else if (cleanUrl.startsWith('/')) {
+      proxied = cleanUrl; // 데모/로컬 업로드 이미지
+    }
+    if (!proxied) return;
     
     list.push({
       key,
-      url: `${API_BASE}/image-proxy?url=${encodeURIComponent(cleanUrl)}`,
+      url: proxied,
       rawUrl: cleanUrl,
       filename: getFilenameFromUrl(cleanUrl),
       isExtra: false,
@@ -315,7 +403,7 @@ function mergeAllImagesSmart(baseImages, extraRawUrls) {
     merged.push({
       num: merged.length + 1,
       key: `crawl${idx + 1}`,
-      url: `${API_BASE}/image-proxy?url=${encodeURIComponent(clean)}`,
+      url: photoSrc(clean),
       rawUrl: clean,
       filename: fn,
       isExtra: true,
@@ -390,22 +478,28 @@ function renderPage(isAppend = false) {
     const sexNeuter = `${getSexIcon(animal.sexCd)} / ${animal.neuterYn === 'Y' ? '중성화O' : '중성화X'}`;
     const happenDt = formatDate(animal.happenDt);
     const imgSrc = getThumbnailUrl(animal);
-    const stateText = (animal.processState || '').includes('공고') ? '📢 공고중' : '🏠 보호중';
-    const stateClass = (animal.processState || '').includes('공고') ? 'badge-notice' : 'badge-protect';
+    const badge = badgeFor(animal);
+    const logCount = animal.logCount || 0;
+    const mngSuffix = getDesertionNo(animal).slice(-5); // 관리번호 뒷자리 5자리
 
     return `
       <div class="animal-card" onclick="showDetail(${realIndex})">
         <div class="card-image">
           <img src="${imgSrc}" alt="${kindText}" loading="lazy" onerror="handleImgError(this)">
-          <span class="card-badge ${stateClass}">${stateText}</span>
+          <span class="card-badge ${badge.cls}" title="${escapeHtml(animal.processState || '')}">${badge.text}</span>
           <span class="card-kind">${kindText}</span>
+          ${logCount > 0 ? `<span class="card-news-pill" title="케어 기록 ${logCount}건"><i class="far fa-newspaper"></i> ${logCount}</span>` : ''}
         </div>
         <div class="card-body">
-          <h3>${animal.noticeNo || '공고번호 미상'}</h3>
+          <div class="card-title-row">
+            <h3>${animal.noticeNo || '공고번호 미상'}</h3>
+            ${mngSuffix ? `<span class="card-mng-no" title="관리번호 ${escapeHtml(getDesertionNo(animal))}">#${mngSuffix}</span>` : ''}
+          </div>
           <div class="card-info">
             <div class="card-info-item"><i class="fas fa-map-marker-alt"></i><span>${animal.happenPlace || '일대'}</span></div>
             <div class="card-info-item"><i class="fas fa-palette"></i><span>${animal.colorCd || '미상'} · ${animal.age || '미상'}</span></div>
             <div class="card-info-item"><i class="fas fa-venus-mars"></i><span>${sexNeuter}</span></div>
+            ${animal.lastLog ? `<div class="card-info-item card-lastlog"><i class="fas fa-pen"></i><span>최근: ${escapeHtml(animal.lastLog.title)}</span></div>` : ''}
           </div>
         </div>
         <div class="card-footer">
@@ -497,6 +591,96 @@ function showModalImageByIndex(index) {
 }
 
 // ==============================================================
+// 🆕 케어 타임라인
+// ==============================================================
+async function fetchAnimalLogs(desertionNo) {
+  if (!desertionNo) return [];
+  const key = String(desertionNo);
+  const cached = logsCache.get(key);
+  if (cached && Date.now() - cached.t < 30 * 1000) return cached.logs;
+  try {
+    const response = await fetch(`${API_BASE}/animals/${encodeURIComponent(key)}/logs`, { cache: 'no-store' });
+    const data = await response.json();
+    const logs = Array.isArray(data.logs) ? data.logs : [];
+    logsCache.set(key, { t: Date.now(), logs });
+    return logs;
+  } catch (_) {
+    return [];
+  }
+}
+
+// API 기본정보(입소·공고)로 자동 항목을 만들고, 관리자 로그와 합쳐 최신순 정렬
+function buildTimelineEntries(animal, logs) {
+  const entries = [];
+  const hasManualIntake = (logs || []).some((l) => l.type === 'intake');
+
+  if (!hasManualIntake && animal.happenDt) {
+    entries.push({
+      id: 'auto-intake',
+      auto: true,
+      date: String(animal.happenDt),
+      type: 'intake',
+      title: '보호소 입소',
+      content: [
+        animal.happenPlace ? `발견 장소: ${animal.happenPlace}` : '',
+        animal.specialMark ? `입소 시 특징: ${animal.specialMark}` : ''
+      ].filter(Boolean).join('\n')
+    });
+  }
+  if (animal.noticeSdt) {
+    entries.push({
+      id: 'auto-notice',
+      auto: true,
+      date: String(animal.noticeSdt),
+      type: 'notice',
+      title: '공고 시작',
+      content: `공고 기간 ${formatDate(animal.noticeSdt)} ~ ${formatDate(animal.noticeEdt || '')}`
+    });
+  }
+  const manual = (logs || []).map((l) => ({ ...l, manual: true }));
+  return [...entries, ...manual].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+}
+
+function timelineHtml(animal, logs) {
+  const loading = logs === null;
+  const count = animal.logCount || 0;
+
+  let bodyHtml;
+  if (loading) {
+    bodyHtml = `<div class="timeline-loading"><i class="fas fa-circle-notch fa-spin"></i> 케어 기록을 불러오는 중...</div>`;
+  } else {
+    const entries = buildTimelineEntries(animal, logs);
+    if (!entries.length) {
+      bodyHtml = `<div class="timeline-empty">아직 기록이 없습니다.</div>`;
+    } else {
+      bodyHtml = `<div class="timeline">${entries.map((e, i) => {
+        const meta = LOG_TYPES[e.type] || LOG_TYPES.note;
+        return `
+          <div class="timeline-item ${e.auto ? 'is-auto' : ''}">
+            <div class="tl-marker" style="background:${meta.color}">${meta.icon}</div>
+            <div class="tl-body">
+              <div class="tl-head">
+                <span class="tl-date">${formatDate(e.date)}</span>
+                <span class="tl-type" style="color:${meta.color}; border-color:${meta.color}55">${meta.label}</span>
+                ${(!e.auto && i === 0) ? '<span class="tl-latest">최근</span>' : ''}
+                ${e.auto ? '<span class="tl-auto-tag">시스템 자동</span>' : ''}
+              </div>
+              <div class="tl-title">${escapeHtml(e.title || '')}</div>
+              ${e.content ? `<div class="tl-content">${escapeHtml(e.content).replace(/\n/g, '<br>')}</div>` : ''}
+            </div>
+          </div>`;
+      }).join('')}</div>`;
+    }
+  }
+
+  return `
+    <div class="timeline-section">
+      <h3 class="timeline-title"><i class="fas fa-book-open"></i> 입소 후 케어 기록${!loading && count ? ` <span class="tl-count-badge">${count}</span>` : ''}</h3>
+      ${bodyHtml}
+    </div>`;
+}
+
+// ==============================================================
 // 🎯 상세 모달
 // ==============================================================
 async function showDetail(index) {
@@ -513,6 +697,7 @@ async function showDetail(index) {
 
   modalImages = mergeAllImagesSmart(baseImages, []);
   modalImageIndex = 0; pointerActive = false; swipeLocked = null; pointerDeltaX = 0;
+  currentLogs = null;
 
   const noticePeriod = (animal.noticeSdt && animal.noticeEdt) ? `${formatDate(animal.noticeSdt)} ~ ${formatDate(animal.noticeEdt)}` : '정보 없음';
 
@@ -523,15 +708,19 @@ async function showDetail(index) {
   if (shareId) setDetailHash(shareId);
 
   if (desertionNo) {
-    const extraUrls = await fetchExtraImages(desertionNo);
-    
+    const [extraUrls, logs] = await Promise.all([
+      fetchExtraImages(desertionNo),
+      fetchAnimalLogs(desertionNo)
+    ]);
+
     if (!isModalOpen || currentDetailIndex !== index) return;
 
     const merged = mergeAllImagesSmart(baseImages, extraUrls);
-    
+
     modalImages = merged;
     modalImageIndex = 0;
-    
+    currentLogs = logs;
+
     renderModalContent(animal, index, kindTitle, stateText, noticePeriod);
   }
 }
@@ -574,7 +763,11 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
     galleryHtml = `<div class="modal-gallery-wrapper"><div class="modal-main-image-box"><img src="${PLACEHOLDER_SVG}" alt="사진 미등록"></div></div>`;
   }
 
-  // 💡 노란색 URL 디버그 박스는 제거된 상태로 깔끔하게 렌더링
+  const badge = badgeFor(animal);
+  const stateValue = animal.customStatus
+    ? `<span style="font-weight:bold; color:${badge.color};">${badge.text}</span> <span class="state-api-sub">(시스템: ${escapeHtml(stateText)})</span>`
+    : `<span style="font-weight:bold; color:${badge.color};">${stateText}</span>`;
+
   document.getElementById('modalBody').innerHTML = `
     ${galleryHtml}
     <div class="modal-detail">
@@ -584,7 +777,7 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
       </div>
 
       <div class="detail-grid">
-        <div class="detail-item"><span class="label">보호 상태</span><span class="value" style="font-weight:bold; color:#10B981;">${stateText}</span></div>
+        <div class="detail-item"><span class="label">보호 상태</span><span class="value">${stateValue}</span></div>
         <div class="detail-item"><span class="label">성별 / 중성화</span><span class="value">${getSexIcon(animal.sexCd)} / ${animal.neuterYn === 'Y' ? '중성화 완료' : '중성화 안됨'}</span></div>
         <div class="detail-item"><span class="label">나이 / 체중</span><span class="value">${animal.age || '미상'} / ${animal.weight || '미상'}</span></div>
         <div class="detail-item"><span class="label">털색</span><span class="value">${animal.colorCd || '미상'}</span></div>
@@ -593,6 +786,8 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
         <div class="detail-item"><span class="label">공고 기간</span><span class="value">${noticePeriod}</span></div>
         <div class="detail-item full"><span class="label">특징 및 건강상태</span><span class="value" style="background:#F0FDF4; padding:8px 10px; border-radius:6px; line-height:1.4;">${animal.specialMark || '특이사항 없음'}</span></div>
       </div>
+
+      ${timelineHtml(animal, currentLogs)}
 
       <div class="shelter-info">
         <h3 class="shelter-title"><i class="fas fa-home"></i> 입양 문의처</h3>
@@ -645,6 +840,7 @@ function closeModal(options = {}) {
   modalImages = [];
   modalImageIndex = 0;
   pointerActive = false;
+  currentLogs = null;
   if (!options.skipHashClear) setDetailHash('');
 }
 
