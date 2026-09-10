@@ -1,20 +1,17 @@
 {
-  "name": "animal-shelter",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "ganghwa-shelter-site",
+  "version": "1.2.0",
+  "private": true,
+  "description": "강화유기동물보호센터 안내 사이트 — APMS 공공 API + 로컬 케어 데이터 레이어 (MongoDB/로컬 파일 자동 전환)",
+  "main": "server/server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server/server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "axios": "^1.19.0",
-    "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "xml2js": "^0.6.2"
+    "axios": "^1.7.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "mongodb": "^6.3.0"
   }
 }

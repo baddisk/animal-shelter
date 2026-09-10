@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>관리자 | 강화유기동물보호센터</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+
+  <!-- 로그인 -->
+  <div id="loginView" class="login-card" style="display:none;">
+    <h1>🔒 관리자 로그인</h1>
+    <div class="admin-field">
+      <label>비밀번호</label>
+      <input type="password" id="pw" placeholder="관리자 비밀번호" onkeydown="if(event.key==='Enter')adminLogin()">
+    </div>
+    <div id="loginErr" style="display:none; color:#DC2626; font-size:0.8rem; margin-bottom:10px;"></div>
+    <button class="btn-primary" style="width:100%;" onclick="adminLogin()">로그인</button>
+    <p style="margin-top:14px; font-size:0.75rem; color:#94A3B8; text-align:center;">
+      <a href="/" style="color:#94A3B8;">← 사이트로 돌아가기</a>
+    </p>
+  </div>
+
+  <!-- 관리 화면 -->
+  <div id="adminView" class="admin-wrap" style="display:none;">
+    <div class="admin-header">
+      <h1>🐕 개체 상태 · 케어 기록 관리</h1>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <a href="/" class="btn-ghost"><i class="fas fa-home"></i> 사이트 보기</a>
+        <button class="btn-ghost" onclick="adminLogout()"><i class="fas fa-sign-out-alt"></i> 로그아웃</button>
+      </div>
+    </div>
+
+    <div class="admin-layout">
+      <!-- 개체 목록 -->
+      <div class="admin-list" id="adminList">
+        <div class="admin-list-empty"><i class="fas fa-circle-notch fa-spin"></i> 개체 목록 불러오는 중...</div>
+      </div>
+
+      <!-- 편집 패널 -->
+      <div class="admin-panel" id="adminPanel">
+        <p style="color:#94A3B8; font-size:0.9rem;">왼쪽에서 개체를 선택하세요.<br>선택하면 상태 변경과 케어 기록 작성이 가능합니다.</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="admin-toast"></div>
+
+  <script src="js/admin.js"></script>
+</body>
+</html>

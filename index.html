@@ -92,6 +92,18 @@
     </div>
   </section>
 
+  <!-- 상태 필터 (보호소 지정 상태) -->
+  <section class="status-filter-section">
+    <div class="container">
+      <div class="status-filter" id="statusFilter">
+        <button type="button" class="status-chip active" data-status="all">전체 <em id="cntAll">0</em></button>
+        <button type="button" class="status-chip chip-foster" data-status="foster">🏡 임시보호중 <em id="cntFoster">0</em></button>
+        <button type="button" class="status-chip chip-adopting" data-status="adopting">🤝 입양진행중 <em id="cntAdopting">0</em></button>
+        <button type="button" class="status-chip chip-news" data-status="news">📝 새소식 있는 개체 <em id="cntNews">0</em></button>
+      </div>
+    </div>
+  </section>
+
   <!-- 동물 카드 리스트 -->
   <section class="animals">
     <div class="container">
