@@ -68,7 +68,7 @@ body {
 .card-badge { position: absolute; top: 8px; left: 8px; padding: 4px 10px; border-radius: 14px; font-size: 0.75rem; font-weight: 600; color: white; }
 .badge-protect { background: #10B981; }
 .badge-notice { background: #F59E0B; }
-.card-kind { position: absolute; top: 8px; right: 8px; padding: 4px 10px; border-radius: 14px; font-size: 0.75rem; font-weight: 600; background: rgba(0,0,0,0.6); color: white; }
+.card-kind { position: absolute; top: 8px; right: 8px; padding: 4px 10px; border-radius: 14px; font-size: 0.75rem; font-weight: 600; background: rgba(0,0,0,0.6); color: white; max-width: calc(100% - 110px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
 .card-body { padding: 12px; flex: 1; }
 .card-body h3 { font-size: 0.9rem; margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-info { display: flex; flex-direction: column; gap: 4px; }
@@ -229,7 +229,7 @@ body {
   .filters { position: static; }
   .btn-top { bottom: 20px; right: 20px; width: 44px; height: 44px; font-size: 1.1rem; }
   .filter-group { min-width: 120px; }
-  .animal-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+  .animal-grid { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
   .card-image { height: 150px; }
 
   .modal { padding: 0; align-items: flex-end; }
@@ -246,8 +246,8 @@ body {
   .stat-card { padding: 10px 12px; gap: 8px; }
   .stat-card i { width: 36px; height: 36px; font-size: 1.15rem; }
   .stat-number { font-size: 1.2rem; }
-  .animal-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
-  .card-image { height: 130px; }
+  .animal-grid { grid-template-columns: 1fr; gap: 12px; }
+  .card-image { height: 200px; }
   .card-body { padding: 10px; }
   .card-body h3 { font-size: 0.8rem; }
   .card-info-item { font-size: 0.72rem; }
@@ -278,7 +278,7 @@ body {
 }
 
 @media (max-width: 360px) {
-  .animal-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .animal-grid { grid-template-columns: 1fr; gap: 10px; }
   .modal-main-image-box { min-height: 180px; max-height: 240px; }
   .detail-grid { grid-template-columns: 1fr; }
   .insta-logo-icon { width: 48px; height: 48px; }
