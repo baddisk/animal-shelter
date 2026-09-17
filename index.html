@@ -5,7 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="referrer" content="no-referrer">
   <title>🐾 강화군 동물보호센터 - 보호중인 유기동물</title>
-  <link rel="stylesheet" href="css/style.css?v=1.2.2">
+  <meta name="description" content="강화도에서 가족을 기다리는 보호중 유기동물 정보와 입양 안내">
+
+  <!-- 파비콘 · 홈 화면 아이콘 (P2) -->
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#FF6B35">
+
+  <!-- 개체별 링크 미리보기(OG). /a/:id 로 진입 시 서버가 개체 정보로 교체한다 (P0-2) -->
+  <!--OG-->
+
+  <link rel="stylesheet" href="css/style.css?v=1.3.0">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 </head>
 <body>
@@ -127,9 +138,9 @@
   </section>
 
   <!-- 상세 모달창 -->
-  <div id="modal" class="modal" style="display:none;">
+  <div id="modal" class="modal" style="display:none;" role="dialog" aria-modal="true" aria-label="보호동물 상세정보">
     <div class="modal-content">
-      <button class="modal-close" id="modalClose">&times;</button>
+      <button class="modal-close" id="modalClose" aria-label="닫기">&times;</button>
       <div id="modalBody"></div>
     </div>
   </div>
@@ -141,6 +152,16 @@
     </div>
   </footer>
 
-  <script src="js/app.js?v=1.2.2"></script>
+  <!--BOOT-->
+  <script src="js/app.js?v=1.3.0"></script>
+
+  <!-- 서비스워커 등록 (P2: 웹앱 설치 — 홈 화면에 앱처럼 추가) -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      });
+    }
+  </script>
 </body>
 </html>

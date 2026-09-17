@@ -1,2 +1,6 @@
 node_modules/
 .env
+data/events.log
+# 런타임 데이터 — MongoDB(또는 서버 로컬)에서 관리한다.
+# 저장소에 커밋하면 배포 때마다 옛 데이터가 실데이터를 덮어쓴다.
+data/db.json

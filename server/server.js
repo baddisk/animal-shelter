@@ -6,8 +6,15 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 
+// 🖼️ 이미지 리사이즈/WebP 변환용 (없어도 원본 그대로 동작하도록 optional require)
+let sharp = null;
+try { sharp = require('sharp'); } catch (_) { console.warn('⚠️ sharp 미설치 — 이미지 원본 그대로 제공됩니다.'); }
+
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Cloudflare 등 프록시 뒤에서 req.protocol / req.ip 를 올바르게 인식
+app.set('trust proxy', true);
 
 app.use(cors());
 app.use(express.json());
@@ -17,6 +24,158 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/data/')) return res.status(403).send('Forbidden');
   next();
 });
+
+// ==============================================================
+// 🔗 개체별 공유 경로 /a/:id  (P0-2: 카카오톡/문자 링크 미리보기 = OG 태그)
+//    - 정적 파일 서빙보다 위에 두어야 index.html이 아니라 이 핸들러가 먼저 잡는다.
+//    - 샵(#) 해시는 서버로 전송되지 않으므로 실제 경로(/a/2026-00444)를 열어
+//      서버가 "어떤 아이인지" 알고 개체별 OG 메타태그를 넣어준다.
+//    - 기존 #detail/... 링크도 그대로 살려 두므로 이미 나간 링크가 깨지지 않는다.
+// ==============================================================
+const INDEX_HTML_PATH = path.join(__dirname, '..', 'index.html');
+let indexHtmlCache = null;
+function getIndexHtml() {
+  if (indexHtmlCache == null) {
+    try { indexHtmlCache = fs.readFileSync(INDEX_HTML_PATH, 'utf8'); }
+    catch (_) { indexHtmlCache = '<!DOCTYPE html><html><head><!--OG--></head><body><!--BOOT--></body></html>'; }
+  }
+  return indexHtmlCache;
+}
+
+// 따옴표·꺾쇠를 치환 — 특징 문구에 "가 있으면 태그가 깨지므로 반드시 필요
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// noticeNo 뒤 5자리 등으로 개체를 찾는다 (예: 2026-00444)
+function findAnimalByShareId(list, id) {
+  const target = String(id || '').trim().toLowerCase();
+  if (!target) return null;
+  return list.find((x) => {
+    const notice = String(x?.noticeNo || '').toLowerCase();
+    const desert = String(x?.desertionNo || x?.desertionNO || '').toLowerCase();
+    return notice.endsWith(target) || target.endsWith(desert) || desert.endsWith(target)
+      || notice.replace(/[^0-9-]/g, '').endsWith(target);
+  }) || null;
+}
+
+// noticeNo에서 /a/ 경로용 표준 id를 뽑는다 (예: 인천-강화-2026-00444 → 2026-00444)
+function shareIdOf(a) {
+  const m = String(a?.noticeNo || '').match(/(\d{4}-\d+)/);
+  if (m) return m[1];
+  return String(a?.noticeNo || a?.desertionNo || a?.desertionNO || '').replace(/[^0-9A-Za-z-]/g, '');
+}
+
+// ==============================================================
+// 🔗 P1-3: 개체별 단축 코드(5자) — /p/4a7k 형태의 짧은 링크
+//    - desertionNo(없으면 noticeNo) 해시 기반이라 재배포/재시작에도 코드가 변하지 않는다.
+//    - 별도 저장소가 필요 없다(무상태). 자체 도메인을 붙이면 ghw.kr/4a7k 까지 짧아진다.
+//    - 문자(SMS)는 한글 45자를 넘으면 장문 요금 구간으로 올라가므로 링크를 짧게 유지한다.
+// ==============================================================
+function shortCodeOf(item) {
+  const key = String(item?.desertionNo || item?.desertionNO || item?.noticeNo || '').trim();
+  if (!key) return '';
+  const h = crypto.createHash('sha1').update(key).digest('hex');
+  return parseInt(h.slice(0, 10), 16).toString(36).slice(0, 5);
+}
+
+// OG 메타태그를 넣은 index.html을 만들어 응답한다 (── /a/:id · /p/:code 공용)
+function sendSharePage(req, res, a) {
+  const base = `${req.protocol}://${req.get('host')}`;
+  const canonicalId = shareIdOf(a);                 // 표준 주소는 항상 /a/:id 로 통일
+  const rawPhoto = a.popfile1 || a.popfile2 || a.popfile || '';
+  const photo = rawPhoto
+    ? (rawPhoto.startsWith('/') ? `${base}${rawPhoto}` : `${base}/api/image-proxy?url=${encodeURIComponent(rawPhoto)}&w=800`)
+    : `${base}/logo.svg`;
+  const sex = a.sexCd === 'M' ? '수컷' : a.sexCd === 'F' ? '암컷' : '미상';
+  const n = [1, 2, 3, 4, 5, 6, 7, 8].filter((i) => a['popfile' + i]).length || 1;
+  const kind = (a.kindFullNm || a.kindNm || '유기동물')
+    .replace('[개]', '강아지').replace('[고양이]', '고양이').replace('[기타축종]', '기타');
+
+  const og = `
+    <meta property="og:type"        content="website">
+    <meta property="og:site_name"   content="강화유기동물보호센터">
+    <meta property="og:title"       content="${esc(kind)} · ${sex} · ${esc(a.age || '나이 미상')}">
+    <meta property="og:description" content="${esc(a.happenPlace || '강화군')} 발견 · 사진 ${n}장과 상세정보를 확인하세요">
+    <meta property="og:image"       content="${esc(photo)}">
+    <meta property="og:image:width" content="800">
+    <meta property="og:url"         content="${base}/a/${esc(canonicalId)}">
+    <meta name="twitter:card"       content="summary_large_image">`;
+
+  // 화면 쪽(app.js)이 이 값을 읽어 해당 개체를 자동으로 연다
+  const boot = `<script>window.__OPEN_ID=${JSON.stringify(String(canonicalId))}</script>`;
+
+  const html = getIndexHtml()
+    .replace('<!--OG-->', og)
+    .replace('<!--BOOT-->', boot);
+
+  res.set('Cache-Control', 'public, max-age=300');
+  res.type('html').send(html);
+}
+
+app.get('/a/:id', async (req, res) => {
+  try {
+    let list = [];
+    try { list = await getAnimalsForShare(); } catch (_) {}
+    const a = findAnimalByShareId(list, req.params.id);
+
+    // 개체를 못 찾으면 홈으로 (링크 오타 등)
+    if (!a) return res.redirect('/');
+    return sendSharePage(req, res, a);
+  } catch (e) {
+    console.error('OG 렌더 실패:', e.message);
+    res.redirect('/');
+  }
+});
+
+// P1-3: 단축 링크 /p/:code — 코드로 개체를 찾아 같은 OG 페이지를 그대로 응답한다.
+//        (리다이렉트 대신 직접 렌더 → 카카오톡 미리보기 로봇이 한 번에 태그를 읽는다)
+app.get('/p/:code', async (req, res) => {
+  try {
+    let list = [];
+    try { list = await getAnimalsForShare(); } catch (_) {}
+    const code = String(req.params.code || '').trim().toLowerCase();
+    const a = list.find((x) => shortCodeOf(x) === code);
+
+    if (!a) return res.redirect('/');
+    return sendSharePage(req, res, a);
+  } catch (e) {
+    console.error('단축링크 렌더 실패:', e.message);
+    res.redirect('/');
+  }
+});
+
+// ---- robots.txt / sitemap.xml (P2: 검색 노출 = 입양 유입 경로 추가) ----
+app.get('/robots.txt', (req, res) => {
+  const base = `${req.protocol}://${req.get('host')}`;
+  res.type('text/plain').send(
+    [
+      'User-agent: *',
+      'Allow: /',
+      'Disallow: /admin.html',   // 관리자 화면은 색인 차단
+      'Disallow: /api/',
+      `Sitemap: ${base}/sitemap.xml`,
+      ''
+    ].join('\n')
+  );
+});
+
+app.get('/sitemap.xml', async (req, res) => {
+  const base = `${req.protocol}://${req.get('host')}`;
+  let list = [];
+  try { list = await getAnimalsForShare(); } catch (_) {}
+
+  const urls = [`<url><loc>${base}/</loc><changefreq>daily</changefreq><priority>1.0</priority></url>`];
+  for (const a of list) {
+    const id = String(a?.noticeNo || '').match(/(\d{4}-\d+)/)?.[1];
+    if (id) urls.push(`<url><loc>${base}/a/${id}</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`);
+  }
+  res.type('application/xml').send(
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join('\n')}\n</urlset>`
+  );
+});
+
 app.use(express.static(path.join(__dirname, '..')));
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
@@ -43,13 +202,22 @@ const DB_PATH = path.join(DATA_DIR, 'db.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 let db = { animals: {} };
-try {
-  db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-  if (!db.animals || typeof db.animals !== 'object') db.animals = {};
-} catch (_) { /* 최초 실행 시 파일 없음 */ }
+// MONGODB_URI 가 있으면 MongoDB가 유일한 원천(source of truth)이다.
+//  - 이때는 저장소에 함께 배포되는 data/db.json 을 절대 읽지 않는다.
+//    (읽으면 커밋된 옛 db.json 이 MongoDB 실데이터를 덮어써서
+//     "관리자에서 바꿔도 db.json 내용만 보인다"는 문제가 생긴다.)
+//  - MONGODB_URI 가 없을 때만(로컬 개발) 파일에서 로드한다.
+const USE_MONGO = !!process.env.MONGODB_URI;
+if (!USE_MONGO) {
+  try {
+    db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+    if (!db.animals || typeof db.animals !== 'object') db.animals = {};
+  } catch (_) { /* 최초 실행 시 파일 없음 */ }
+}
 
 let saveTimer = null;
 function saveDB() {
+  if (USE_MONGO) return; // Mongo 모드에서는 파일에 쓰지 않는다(실데이터 원천은 MongoDB)
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try {
@@ -68,14 +236,19 @@ function saveDB() {
 //    없으면 기존처럼 로컬 data/db.json 에 저장 (개발용)
 // ==============================================================
 let mongoColl = null;
+let eventColl = null;   // P1-1: 조회/전환 이벤트 저장용 컬렉션
 (async () => {
   if (!process.env.MONGODB_URI) return;
   try {
     const { MongoClient } = require('mongodb');
     const client = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
     await client.connect();
-    mongoColl = client.db(process.env.MONGODB_DB || 'shelter').collection('animals');
+    const database = client.db(process.env.MONGODB_DB || 'shelter');
+    mongoColl = database.collection('animals');
+    eventColl = database.collection('events');
     const docs = await mongoColl.find({}).toArray();
+    // MongoDB 내용으로 완전히 교체(merge 아님) — 커밋된 db.json 잔재가 섞이지 않게 한다.
+    db.animals = {};
     for (const d of docs) {
       const { _id, ...rest } = d;
       db.animals[String(_id)] = rest;
@@ -84,8 +257,33 @@ let mongoColl = null;
   } catch (e) {
     console.error('⚠️ MongoDB 연결 실패 → 로컬 파일 모드로 동작:', e.message);
     mongoColl = null;
+    eventColl = null;
   }
 })();
+
+// ==============================================================
+// 📈 P1-1: 조회/전환 이벤트 수집 (개인정보 없이 집계값만)
+//    MongoDB가 있으면 events 컬렉션에, 없으면 data/events.log(JSON Lines)에 append.
+//    ⚠️ Render는 재배포 시 디스크가 초기화되므로, 운영에서는 Persistent Disk를
+//       붙이거나 MONGODB_URI(외부 DB)를 사용해야 기록이 유실되지 않습니다.
+// ==============================================================
+const VALID_EVENTS = new Set([
+  'link_copy', 'link_share', 'detail_open', 'photo_swipe',
+  'detail_close', 'similar_click', 'reserve_click'
+]);
+const EVENTS_LOG = path.join(DATA_DIR, 'events.log');
+
+async function saveEvent(evt) {
+  try {
+    if (eventColl) {
+      await eventColl.insertOne(evt);
+    } else {
+      fs.appendFile(EVENTS_LOG, JSON.stringify(evt) + '\n', () => {});
+    }
+  } catch (e) {
+    console.error('📈 이벤트 저장 실패:', e.message);
+  }
+}
 
 async function persistAnimal(key) {
   const rec = db.animals[key];
@@ -143,12 +341,19 @@ function enrichItem(item) {
     customStatus: rec?.status || null,          // 'foster' | 'adopting' | null
     statusUpdatedAt: rec?.statusUpdatedAt || null,
     logCount: logs.length,
-    lastLog: last ? { date: last.date, type: last.type, title: last.title } : null
+    lastLog: last ? { date: last.date, type: last.type, title: last.title } : null,
+    shortCode: shortCodeOf(item)                // P1-3: /p/:code 단축 링크용 5자 코드
   };
 }
 
 // ---- 관리자 인증 (간단 토큰 방식) ----
+// P1-2: 상태 변경·기록 저장 라우트는 아래 requireAdmin 으로 "서버에서" 토큰을 검사한다.
+//       (화면에서만 막는 것이 아니라 서버가 401을 돌려주므로 개발자도구로 우회 불가)
+//       비밀번호는 코드에 적지 말고 Render 대시보드의 Environment 탭에 ADMIN_PASSWORD 로 넣을 것.
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'shelter1234';
+if (!process.env.ADMIN_PASSWORD) {
+  console.warn('⚠️ ADMIN_PASSWORD 미설정 — 임시 비밀번호로 동작 중입니다. 운영 전 반드시 환경변수로 지정하세요.');
+}
 const adminSessions = new Set();
 function tokenOf(req) {
   return String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -170,6 +375,20 @@ app.post('/api/admin/login', (req, res) => {
 app.post('/api/admin/logout', (req, res) => {
   adminSessions.delete(tokenOf(req));
   res.json({ ok: true });
+});
+
+// ---- 공개: 조회/전환 이벤트 수집 (P1-1) ----
+app.post('/api/track', (req, res) => {
+  const event = String(req.body?.event || '').trim();
+  if (!VALID_EVENTS.has(event)) return res.sendStatus(204); // 알 수 없는 이벤트는 조용히 무시
+  const evt = {
+    ts: Date.now(),
+    event,
+    id: req.body?.id != null ? String(req.body.id).slice(0, 40) : null,
+    meta: (req.body && typeof req.body.meta === 'object') ? req.body.meta : {}
+  };
+  saveEvent(evt); // 비동기 — 응답을 막지 않음
+  res.sendStatus(204);
 });
 
 // ---- 공개: 개체 케어 로그 조회 ----
@@ -458,6 +677,12 @@ app.get('/api/image-proxy', async (req, res) => {
   const imageUrl = req.query.url;
   if (!imageUrl || imageUrl === 'undefined') return res.status(400).send('URL 오류');
 
+  // P0-4: 요청 폭(w)에 맞춰 리사이즈 + WebP 변환으로 전송량을 8~12분의 1로 줄인다.
+  //  - 목록 카드 &w=400 · 상세 큰 사진 &w=1000 · 썸네일 &w=160
+  //  - 원본보다 크게 늘리지 않음(withoutEnlargement), 휴대폰 사진 방향 자동 보정(rotate)
+  const wReq = Number(req.query.w);
+  const targetW = Number.isFinite(wReq) && wReq > 0 ? Math.min(wReq, 1600) : null;
+
   for (const targetUrl of generateCandidateUrls(imageUrl)) {
     try {
       const response = await axios.get(targetUrl, {
@@ -484,7 +709,26 @@ app.get('/api/image-proxy', async (req, res) => {
         else if (b0 === 0x47 && b1 === 0x49) contentType = 'image/gif';
         else continue;
       }
-      res.set('Content-Type', contentType);
+
+      // GIF(움짤)는 변환하면 애니메이션이 깨지므로 원본 유지, 그 외에는 sharp로 변환
+      const isGif = contentType === 'image/gif';
+      if (sharp && !isGif) {
+        try {
+          let pipeline = sharp(Buffer.from(buf)).rotate();          // EXIF 방향 자동 보정
+          if (targetW) pipeline = pipeline.resize({ width: targetW, withoutEnlargement: true });
+          const out = await pipeline.webp({ quality: 78 }).toBuffer();
+          res.set('Content-Type', 'image/webp');
+          // 크기별 주소가 고정 콘텐츠이므로 1년 immutable → Cloudflare가 대신 캐시
+          res.set('Cache-Control', 'public, max-age=31536000, immutable');
+          return res.send(out);
+        } catch (convErr) {
+          // 변환 실패 시 원본으로 폴백
+        }
+      }
+
+      // P2(이미지 응답 형식): 원본 헤더에 붙어오는 charset(예: ;charset=MS949)을 떼어
+      //  순수 이미지 MIME만 내보낸다. 이미지에 문자셋이 붙으면 일부 클라이언트가 오해할 수 있다.
+      res.set('Content-Type', contentType.split(';')[0].trim());
       res.set('Cache-Control', 'public, max-age=604800');
       return res.send(Buffer.from(buf));
     } catch {
@@ -747,6 +991,19 @@ async function fetchGanghwaAnimalsFromApi(queryParams) {
     String(b.happenDt || '').replace(/\D/g, '').localeCompare(String(a.happenDt || '').replace(/\D/g, ''))
   );
   return filtered;
+}
+
+// OG 태그 렌더용: 캐시에 있으면 그대로, 없으면 한 번 조회해서 채운다.
+// (데모 모드에서는 목 데이터를 사용)
+async function getAnimalsForShare() {
+  if (!process.env.API_KEY) return MOCK_ANIMALS;
+  // 이미 예열/조회로 채워진 캐시가 있으면 재사용
+  for (const v of animalCache.values()) {
+    if (v?.items?.length) return v.items;
+  }
+  const items = await fetchGanghwaAnimalsFromApi({});
+  animalCache.set(JSON.stringify({}), { timestamp: Date.now(), items });
+  return items;
 }
 
 app.get('/api/animals', async (req, res) => {

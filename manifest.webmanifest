@@ -1,0 +1,16 @@
+{
+  "name": "강화유기동물보호센터",
+  "short_name": "강화보호센터",
+  "description": "강화도에서 가족을 기다리는 보호중 유기동물 정보·입양 안내",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#FF6B35",
+  "lang": "ko",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}

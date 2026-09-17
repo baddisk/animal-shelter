@@ -440,3 +440,35 @@ body {
 }
 .admin-list-header b { color: var(--text); font-size: 0.95rem; }
 .admin-list-header .icon-btn { width: 26px; height: 26px; font-size: 0.7rem; }
+
+/* ==========================================================
+   ♿ 접근성 마무리 (P2)
+   ========================================================== */
+
+/* 키보드(Tab)로 이동할 때 현재 위치가 보이도록 초점 표시.
+   마우스 클릭에는 나타나지 않도록 :focus-visible 사용 */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+.animal-card:focus-visible,
+.stat-card:focus-visible,
+.status-chip:focus-visible,
+.modal-thumb-btn:focus-visible {
+  outline: 3px solid #2563EB;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* 움직임 줄이기 설정을 켠 이용자를 위해 애니메이션/전환 효과를 최소화 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
