@@ -202,13 +202,22 @@ const DB_PATH = path.join(DATA_DIR, 'db.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 let db = { animals: {} };
-try {
-  db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-  if (!db.animals || typeof db.animals !== 'object') db.animals = {};
-} catch (_) { /* 최초 실행 시 파일 없음 */ }
+// MONGODB_URI 가 있으면 MongoDB가 유일한 원천(source of truth)이다.
+//  - 이때는 저장소에 함께 배포되는 data/db.json 을 절대 읽지 않는다.
+//    (읽으면 커밋된 옛 db.json 이 MongoDB 실데이터를 덮어써서
+//     "관리자에서 바꿔도 db.json 내용만 보인다"는 문제가 생긴다.)
+//  - MONGODB_URI 가 없을 때만(로컬 개발) 파일에서 로드한다.
+const USE_MONGO = !!process.env.MONGODB_URI;
+if (!USE_MONGO) {
+  try {
+    db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+    if (!db.animals || typeof db.animals !== 'object') db.animals = {};
+  } catch (_) { /* 최초 실행 시 파일 없음 */ }
+}
 
 let saveTimer = null;
 function saveDB() {
+  if (USE_MONGO) return; // Mongo 모드에서는 파일에 쓰지 않는다(실데이터 원천은 MongoDB)
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try {
@@ -238,6 +247,8 @@ let eventColl = null;   // P1-1: 조회/전환 이벤트 저장용 컬렉션
     mongoColl = database.collection('animals');
     eventColl = database.collection('events');
     const docs = await mongoColl.find({}).toArray();
+    // MongoDB 내용으로 완전히 교체(merge 아님) — 커밋된 db.json 잔재가 섞이지 않게 한다.
+    db.animals = {};
     for (const d of docs) {
       const { _id, ...rest } = d;
       db.animals[String(_id)] = rest;
