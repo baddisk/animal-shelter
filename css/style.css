@@ -1,5 +1,27 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+/* ==============================================================
+   ✨ 마무리 품질 (P2)
+   ============================================================== */
+/* 키보드 초점 표시 — 탭 키로 이동할 때 현재 위치가 보인다 */
+:focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+/* 마우스 클릭 사용자에게는 테두리가 남지 않도록 */
+:focus:not(:focus-visible) { outline: none; }
+
+/* 운영체제의 "움직임 줄이기" 설정을 켠 이용자 — 전환·애니메이션 효과 제거 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 :root {
   --primary: #FF6B35;
   --primary-dark: #E55A2B;
@@ -190,6 +212,9 @@ body {
 .modal-detail { padding: 22px; padding-bottom: calc(22px + env(safe-area-inset-bottom, 0px)); }
 .modal-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .modal-title-row h2 { font-size: 1.25rem; margin: 0; flex: 1; min-width: 0; line-height: 1.35; word-break: keep-all; overflow-wrap: anywhere; }
+.modal-title-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+.btn-share-sheet { background: #10B981; box-shadow: 0 2px 4px rgba(16, 185, 129, 0.2); }
+.btn-share-sheet:hover { background: #059669; transform: translateY(-1px); }
 .btn-share-link { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: none; border-radius: 20px; background: #0EA5E9; color: #fff; font-size: 0.8rem; font-weight: 700; cursor: pointer; white-space: nowrap; transition: all 0.2s ease; flex-shrink: 0; box-shadow: 0 2px 4px rgba(14, 165, 233, 0.2); touch-action: manipulation; }
 .btn-share-link:hover { background: #0284C7; transform: translateY(-1px); box-shadow: 0 4px 8px rgba(14, 165, 233, 0.3); }
 .btn-share-link.copied { background: #10B981; box-shadow: 0 2px 4px rgba(16, 185, 129, 0.2); }

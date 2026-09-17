@@ -9,6 +9,7 @@
 
   <!-- 파비콘 · 홈 화면 아이콘 (P2) -->
   <link rel="icon" type="image/png" href="/favicon.png">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="manifest" href="/manifest.webmanifest">
   <meta name="theme-color" content="#FF6B35">
@@ -16,7 +17,9 @@
   <!-- 개체별 링크 미리보기(OG). /a/:id 로 진입 시 서버가 개체 정보로 교체한다 (P0-2) -->
   <!--OG-->
 
-  <link rel="stylesheet" href="css/style.css?v=1.3.0">
+  <!-- 아이콘 폰트 CDN 연결 미리 수립 — 첫 화면 렌더 지연 줄이기 -->
+  <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+  <link rel="stylesheet" href="css/style.css?v=1.4.0">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 </head>
 <body>
@@ -118,7 +121,7 @@
   <!-- 동물 카드 리스트 -->
   <section class="animals">
     <div class="container">
-      <div id="loading" class="loading" style="display:none;">
+      <div id="loading" class="loading" style="display:none;" aria-live="polite">
         <div class="spinner"></div>
         <p>강화군 동물보호센터 데이터를 불러오는 중입니다...</p>
       </div>
@@ -153,7 +156,7 @@
   </footer>
 
   <!--BOOT-->
-  <script src="js/app.js?v=1.3.0"></script>
+  <script src="js/app.js?v=1.4.0"></script>
 
   <!-- 서비스워커 등록 (P2: 웹앱 설치 — 홈 화면에 앱처럼 추가) -->
   <script>
