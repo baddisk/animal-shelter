@@ -7,3 +7,15 @@ data/db.json
 # 런타임 생성 파일 — 이미지 변환 캐시(P0-4)와 이용 집계 로그(P1-1)
 data/img-cache/
 data/events.json
+
+# 루트에 잘못 복사된 레거시 소스·런타임 데이터
+/app.js
+/admin.js
+/server.js
+/style.css
+/db.json
+
+# 셸 명령 오타로 생성될 수 있는 임시 파일
+/(animal.processState
+/item.careNm
+/item.orgdownNm
