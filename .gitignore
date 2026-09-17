@@ -4,3 +4,6 @@ data/events.log
 # 런타임 데이터 — MongoDB(또는 서버 로컬)에서 관리한다.
 # 저장소에 커밋하면 배포 때마다 옛 데이터가 실데이터를 덮어쓴다.
 data/db.json
+# 런타임 생성 파일 — 이미지 변환 캐시(P0-4)와 이용 집계 로그(P1-1)
+data/img-cache/
+data/events.json

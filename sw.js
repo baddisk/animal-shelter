@@ -4,15 +4,15 @@
  *  - 동물 목록·상세·이미지 같은 실시간성 응답(/api, /a, /p)은 절대 캐시하지 않는다.
  *  - 정적 자산(css/js/아이콘 등)만 stale-while-revalidate로 다뤄 최신본을 놓치지 않는다.
  */
-const VERSION = 'v1.3.0';
+const VERSION = 'v1.4.0';
 const STATIC_CACHE = `shelter-static-${VERSION}`;
 
 // 설치 시 미리 받아둘 최소 셸(오프라인/재방문 즉시 표시용)
 const PRECACHE = [
   '/',
   '/index.html',
-  '/css/style.css?v=1.3.0',
-  '/js/app.js?v=1.3.0',
+  '/css/style.css?v=1.4.0',
+  '/js/app.js?v=1.4.0',
   '/logo.svg',
   '/favicon.png',
   '/manifest.webmanifest'
@@ -38,8 +38,8 @@ self.addEventListener('activate', (event) => {
 // 정적 자산인지 판별 (실시간 응답은 제외)
 function isStaticAsset(url) {
   if (url.origin !== self.location.origin) return false;         // 외부(CDN·이미지 원본)는 관여 안 함
-  if (url.pathname.startsWith('/api/')) return false;            // API 응답은 캐시 금지
-  if (url.pathname.startsWith('/a/') || url.pathname.startsWith('/p/')) return false; // 공유/미리보기 페이지 제외
+  if (url.pathname.startsWith('/api/')) return false;            // API 응답은 캐시 금지(이미지는 HTTP 캐시가 담당)
+  if (/^\/(a|p|s)\//.test(url.pathname)) return false;           // 공유/미리보기/짧은주소 페이지 제외
   return /\.(css|js|svg|png|jpg|jpeg|webp|ico|webmanifest|woff2?)$/i.test(url.pathname);
 }
 

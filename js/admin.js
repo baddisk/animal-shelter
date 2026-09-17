@@ -53,7 +53,8 @@ function getKey(a) {
 function thumbUrl(a) {
   const p = a.popfile1 || a.popfile2 || a.popfile || '';
   if (!p) return '';
-  return p.startsWith('/') ? p : `/api/image-proxy?url=${encodeURIComponent(p)}`;
+  // 관리자 목록 썸네일은 56px — w=160 으로 축소해 받으면 목록이 훨씬 빨라진다 (P0-4)
+  return p.startsWith('/') ? p : `/api/image-proxy?url=${encodeURIComponent(p)}&w=160`;
 }
 
 function formatDate8(d) {
@@ -102,7 +103,13 @@ async function adminLogout() {
 }
 
 // ---------- 개체 목록 ----------
-async function loadAnimals() {
+// ✅ 수정: 기존에는 loadAnimals() 가 "항상" refresh=1 을 보냈다.
+//    그런데 이 함수는 상태 변경·케어로그 추가/수정/삭제 직후마다 호출된다(258·284·313행).
+//    즉 관리자 작업 1건 = 서버 동물목록 캐시 무효화 + 최대 20페이지 재조회.
+//    게다가 서버는 refresh=1 을 받으면 detailImageCache 까지 전부 비웠으므로
+//    케어로그 한 줄 저장 → 방문자 전원이 사진 재크롤링(개체당 약 16 아웃바운드) 이었다.
+//    → 평소에는 캐시를 쓰고, 새로고침 버튼을 눌렀을 때만 강제 조회한다.
+async function loadAnimals(forceRefresh = false) {
   const listEl = document.getElementById('adminList');
   listEl.innerHTML = '<div class="admin-list-empty"><i class="fas fa-circle-notch fa-spin"></i> 개체 목록 불러오는 중...</div>';
 
@@ -110,10 +117,10 @@ async function loadAnimals() {
   const ymd = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   const now = new Date(Date.now() + 9 * 3600 * 1000); // KST
   const qs = new URLSearchParams({
-    refresh: '1',
     bgnde: ymd(new Date(now.getFullYear() - 2, now.getMonth(), now.getDate())),
     endde: ymd(now)
   });
+  if (forceRefresh) qs.set('refresh', '1');
 
   try {
     const res = await fetch(`/api/animals?${qs}`);
@@ -126,7 +133,7 @@ async function loadAnimals() {
   const headerHtml = `
     <div class="admin-list-header">
       <span><i class="fas fa-list"></i> 보호중 개체 <b>${animals.length}</b>마리</span>
-      <button type="button" class="icon-btn edit" title="목록 새로고침" onclick="loadAnimals()"><i class="fas fa-sync-alt"></i></button>
+      <button type="button" class="icon-btn edit" title="목록 새로고침(강제 재조회)" onclick="loadAnimals(true)"><i class="fas fa-sync-alt"></i></button>
     </div>`;
 
   if (!animals.length) {

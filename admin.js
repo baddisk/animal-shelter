@@ -53,7 +53,8 @@ function getKey(a) {
 function thumbUrl(a) {
   const p = a.popfile1 || a.popfile2 || a.popfile || '';
   if (!p) return '';
-  return p.startsWith('/') ? p : `/api/image-proxy?url=${encodeURIComponent(p)}`;
+  // 관리자 목록 썸네일은 56px — w=160 으로 축소해 받으면 목록이 훨씬 빨라진다 (P0-4)
+  return p.startsWith('/') ? p : `/api/image-proxy?url=${encodeURIComponent(p)}&w=160`;
 }
 
 function formatDate8(d) {
