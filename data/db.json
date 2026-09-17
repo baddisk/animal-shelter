@@ -1,0 +1,18 @@
+{
+  "animals": {
+    "428357202601030": {
+      "status": "foster",
+      "statusUpdatedAt": "2026-09-10T02:34:04.936Z",
+      "logs": [
+        {
+          "id": "lmtuwylfs1252d3",
+          "date": "2026-09-10",
+          "type": "foster",
+          "title": "임시보호 이동",
+          "content": "",
+          "createdAt": "2026-09-10T02:34:04.936Z"
+        }
+      ]
+    }
+  }
+}
