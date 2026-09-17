@@ -8,6 +8,7 @@ let currentStatusFilter = 'all';   // all | foster | adopting | news
 let currentPage = 1;
 let pendingDetailId = null;
 let isModalOpen = false;
+let animalSearchSequence = 0; // 늦게 끝난 이전 검색 결과가 최신 화면을 덮어쓰지 않도록 한다.
 
 let modalImages = [];
 let modalImageIndex = 0;
@@ -21,6 +22,7 @@ let pointerStartY = 0;
 let pointerDeltaX = 0;
 let pointerDeltaY = 0;
 let pointerActive = false;
+let activeGalleryPointerId = null;
 let swipeLocked = null;
 
 const PLACEHOLDER_SVG = 'data:image/svg+xml,' + encodeURIComponent(
@@ -157,6 +159,12 @@ document.addEventListener('DOMContentLoaded', () => {
   
   ['upkind', 'bgnde', 'endde'].forEach((id) => {
     document.getElementById(id).addEventListener('change', () => {
+      // 축종을 고르는 즉시 해당 통계 카드를 활성화해, 목록이 갱신되는 동안에도
+      // 어떤 조건이 적용되는지 분명하게 보여 준다.
+      if (id === 'upkind') {
+        currentStatsFilter = statsFilterFromUpkind(document.getElementById('upkind').value);
+        updateStatsActiveCard();
+      }
       currentPage = 1;
       searchAnimals(false);
     });
@@ -310,13 +318,20 @@ function handlePopState() {
 }
 
 async function searchAnimals(forceRefresh = false) {
+  // 날짜·축종을 연달아 바꿨을 때 먼저 시작한 요청이 나중에 도착해 현재 선택을
+  // 덮어쓰지 않도록, 가장 최근 요청만 화면에 반영한다.
+  const requestId = ++animalSearchSequence;
   showLoading(true);
-  if (forceRefresh) setSearchBtnLoading(true);
+  setSearchBtnLoading(forceRefresh);
 
   const bgnde = document.getElementById('bgnde').value;
   const endde = document.getElementById('endde').value;
   const upkind = document.getElementById('upkind').value;
-  const params = new URLSearchParams({ bgnde, endde, upkind });
+
+  // 축종 선택값은 서버 조회 조건으로 보내지 않는다. 전체 보호중 목록을 받아
+  // 통계는 언제나 전체 기준으로 표시하고, 목록만 선택한 축종으로 거른다.
+  // 따라서 "강아지"를 선택해도 '보호중 개체수'에는 전체 마릿수가 유지된다.
+  const params = new URLSearchParams({ bgnde, endde });
   if (forceRefresh) params.append('refresh', '1');
 
   try {
@@ -324,19 +339,21 @@ async function searchAnimals(forceRefresh = false) {
       cache: forceRefresh ? 'no-store' : 'default'
     });
     const result = await response.json();
-    
+    if (requestId !== animalSearchSequence) return;
+
     allAnimals = result.items || [];
-    currentStatsFilter = 'all';
+    // 검색 필터에서 고른 축종을 통계 카드의 활성 상태와 목록 필터에 반영한다.
+    currentStatsFilter = statsFilterFromUpkind(upkind);
     currentStatusFilter = 'all';
     currentPage = 1;
-    
+
     updateStatsActiveCard();
     const chips = document.getElementById('statusFilter');
     if (chips) chips.querySelectorAll('.status-chip').forEach((c) => c.classList.toggle('active', c.dataset.status === 'all'));
     renderPage(false);
     updateStats();
     updateStatusChips();
-    
+
     if (pendingDetailId) {
       // 최초 진입 딥링크 — 히스토리를 새로 쌓지 않고 현재 주소 위에서 연다
       openDetailByShareId(pendingDetailId, { pushHistory: false, source: pendingDetailSource || 'link' });
@@ -345,23 +362,53 @@ async function searchAnimals(forceRefresh = false) {
     }
     if (forceRefresh) extraImagesCache.clear();
   } catch (error) {
+    if (requestId !== animalSearchSequence) return;
     console.error('데이터 조회 실패:', error);
     allAnimals = [];
+    currentStatsFilter = statsFilterFromUpkind(upkind);
+    updateStatsActiveCard();
     renderPage(false);
+    updateStats();
+    updateStatusChips();
+  } finally {
+    if (requestId === animalSearchSequence) {
+      showLoading(false);
+      setSearchBtnLoading(false);
+    }
   }
+}
 
-  showLoading(false);
-  if (forceRefresh) setSearchBtnLoading(false);
+const UPKIND_TO_STATS_FILTER = Object.freeze({
+  '417000': 'dog',
+  '422400': 'cat',
+  '429900': 'etc'
+});
+const STATS_FILTER_TO_UPKIND = Object.freeze({
+  all: '',
+  dog: '417000',
+  cat: '422400',
+  etc: '429900'
+});
+
+function statsFilterFromUpkind(upkind) {
+  return UPKIND_TO_STATS_FILTER[String(upkind || '')] || 'all';
+}
+
+function animalStatsGroup(animal) {
+  const code = String(animal?.kindCd || '').trim();
+  if (code === '417000') return 'dog';
+  if (code === '422400') return 'cat';
+  if (code === '429900') return 'etc';
+
+  const kind = String(animal?.kindFullNm || animal?.kindNm || '').trim();
+  if (kind.includes('고양이')) return 'cat';
+  if (kind.includes('[개]') || kind === '개' || kind.startsWith('개 ')) return 'dog';
+  return 'etc';
 }
 
 function getFilteredAnimals() {
   let list = allAnimals;
-  if (currentStatsFilter === 'dog') list = list.filter(a => (a.kindFullNm || a.kindNm || a.kindCd || '').includes('개'));
-  else if (currentStatsFilter === 'cat') list = list.filter(a => (a.kindFullNm || a.kindNm || a.kindCd || '').includes('고양이'));
-  else if (currentStatsFilter === 'etc') list = list.filter(a => {
-    const kind = a.kindFullNm || a.kindNm || a.kindCd || '';
-    return !kind.includes('개') && !kind.includes('고양이');
-  });
+  if (currentStatsFilter !== 'all') list = list.filter((animal) => animalStatsGroup(animal) === currentStatsFilter);
   if (currentStatusFilter === 'foster' || currentStatusFilter === 'adopting') {
     list = list.filter(a => a.customStatus === currentStatusFilter);
   } else if (currentStatusFilter === 'news') {
@@ -370,17 +417,35 @@ function getFilteredAnimals() {
   return list;
 }
 
+function setStatsFilter(filter, { syncSearchFilter = true } = {}) {
+  currentStatsFilter = ['dog', 'cat', 'etc'].includes(filter) ? filter : 'all';
+
+  // 통계 카드를 누른 경우에도 상단 축종 선택값을 함께 맞춰, 화면과 실제 목록
+  // 조건이 서로 다르게 보이지 않도록 한다. 전체 목록은 이미 받아 두었으므로
+  // 이 동작에 추가 API 호출은 필요 없다.
+  if (syncSearchFilter) {
+    const upkind = document.getElementById('upkind');
+    if (upkind) upkind.value = STATS_FILTER_TO_UPKIND[currentStatsFilter];
+  }
+
+  currentPage = 1;
+  updateStatsActiveCard();
+  renderPage(false);
+}
+
 function setupStatsFilterEvents() {
   ['total', 'dog', 'cat', 'etc'].forEach(type => {
     const el = document.querySelector(`.stat-card.${type}`);
-    if (el) {
-      el.addEventListener('click', () => {
-        currentStatsFilter = type === 'total' ? 'all' : type;
-        currentPage = 1;
-        updateStatsActiveCard();
-        renderPage(false);
-      });
-    }
+    if (!el) return;
+
+    const apply = () => setStatsFilter(type === 'total' ? 'all' : type);
+    el.addEventListener('click', apply);
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        apply();
+      }
+    });
   });
 }
 
@@ -412,10 +477,16 @@ function updateStatusChips() {
 }
 
 function updateStatsActiveCard() {
-  document.querySelectorAll('.stat-card').forEach(card => card.classList.remove('active'));
+  document.querySelectorAll('.stat-card').forEach((card) => {
+    card.classList.remove('active');
+    card.setAttribute('aria-pressed', 'false');
+  });
   const sel = currentStatsFilter === 'all' ? '.stat-card.total' : `.stat-card.${currentStatsFilter}`;
   const activeCard = document.querySelector(sel);
-  if (activeCard) activeCard.classList.add('active');
+  if (activeCard) {
+    activeCard.classList.add('active');
+    activeCard.setAttribute('aria-pressed', 'true');
+  }
 }
 
 // ==============================================================
@@ -627,75 +698,129 @@ function renderPage(isAppend = false) {
   else grid.innerHTML = html;
 }
 
+const GALLERY_SWIPE_LOCK_PX = 8;
+const GALLERY_SWIPE_TRIGGER_PX = 40;
+const GALLERY_CLICK_TOLERANCE_PX = 8;
+
+function getModalElement(selector) {
+  return document.getElementById('modalBody')?.querySelector(selector) || null;
+}
+
+function resetGalleryPointer(target) {
+  pointerActive = false;
+  activeGalleryPointerId = null;
+  swipeLocked = null;
+  pointerDeltaX = 0;
+  pointerDeltaY = 0;
+  target?.classList.remove('is-swiping');
+
+  const img = getModalElement('#modalMainImg');
+  if (img) {
+    img.style.transition = 'transform 0.2s ease';
+    img.style.transform = '';
+  }
+}
+
 function setupModalImageNavigation() {
-  const mainBox = document.querySelector('.modal-main-image-box');
+  // renderModalContent가 매번 새 갤러리 DOM을 만들므로 기존 노드를 복제하거나
+  // 바꾸지 않고, 현재 노드에만 이벤트를 연결한다. 이 방식은 썸네일과 메인 이미지
+  // 참조가 서로 다른(분리된) 노드를 가리키는 문제를 막는다.
+  const mainBox = getModalElement('.modal-main-image-box');
   if (!mainBox) return;
-  if (modalImages.length <= 1) { mainBox.classList.remove('has-multiple'); mainBox.style.touchAction = ''; return; }
 
-  mainBox.classList.add('has-multiple');
-  mainBox.style.touchAction = 'none';
+  const hasMultiple = modalImages.length > 1;
+  mainBox.classList.toggle('has-multiple', hasMultiple);
+  mainBox.style.touchAction = '';
+  if (!hasMultiple) return;
 
-  const fresh = mainBox.cloneNode(true);
-  mainBox.parentNode.replaceChild(fresh, mainBox);
-  const imgEl = fresh.querySelector('img'); if (imgEl) imgEl.id = 'modalMainImg';
-  const badgeEl = fresh.querySelector('.modal-img-badge'); if (badgeEl) badgeEl.id = 'modalImgBadge';
+  mainBox.addEventListener('pointerdown', onGalleryPointerDown);
+  mainBox.addEventListener('pointermove', onGalleryPointerMove, { passive: false });
+  mainBox.addEventListener('pointerup', onGalleryPointerUp);
+  mainBox.addEventListener('pointercancel', onGalleryPointerCancel);
 
-  fresh.addEventListener('click', (e) => {
-    if (window.matchMedia('(hover: hover) and (pointer: fine)').matches && Math.abs(pointerDeltaX) <= 10) {
-      e.preventDefault(); showModalImageByIndex(modalImageIndex + 1);
-    }
+  getModalElement('.modal-thumb-strip')?.querySelectorAll('.modal-thumb-btn').forEach((button) => {
+    button.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const index = Number(button.dataset.imageIndex);
+      if (Number.isInteger(index)) showModalImageByIndex(index);
+    });
   });
-
-  fresh.addEventListener('pointerdown', onGalleryPointerDown);
-  fresh.addEventListener('pointermove', onGalleryPointerMove);
-  fresh.addEventListener('pointerup', onGalleryPointerUp);
-  fresh.addEventListener('pointercancel', onGalleryPointerUp);
 }
 
 function onGalleryPointerDown(e) {
-  if (modalImages.length <= 1 || (e.pointerType === 'mouse' && e.button !== 0)) return;
-  pointerActive = true; swipeLocked = null; pointerStartX = e.clientX; pointerStartY = e.clientY; pointerDeltaX = 0; pointerDeltaY = 0;
+  if (modalImages.length <= 1 || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+
+  pointerActive = true;
+  activeGalleryPointerId = e.pointerId;
+  swipeLocked = null;
+  pointerStartX = e.clientX;
+  pointerStartY = e.clientY;
+  pointerDeltaX = 0;
+  pointerDeltaY = 0;
   try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
   e.currentTarget.classList.add('is-swiping');
 }
 
 function onGalleryPointerMove(e) {
-  if (!pointerActive) return;
-  pointerDeltaX = e.clientX - pointerStartX; pointerDeltaY = e.clientY - pointerStartY;
-  if (!swipeLocked && (Math.abs(pointerDeltaX) > 8 || Math.abs(pointerDeltaY) > 8)) swipeLocked = Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY) ? 'h' : 'v';
-  
+  if (!pointerActive || e.pointerId !== activeGalleryPointerId) return;
+
+  pointerDeltaX = e.clientX - pointerStartX;
+  pointerDeltaY = e.clientY - pointerStartY;
+  if (!swipeLocked && (Math.abs(pointerDeltaX) > GALLERY_SWIPE_LOCK_PX || Math.abs(pointerDeltaY) > GALLERY_SWIPE_LOCK_PX)) {
+    swipeLocked = Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY) ? 'h' : 'v';
+  }
+
+  // 세로 스크롤은 브라우저에 맡기고, 명확한 가로 이동일 때만 기본 동작을 막는다.
   if (swipeLocked === 'h') {
     e.preventDefault();
-    const img = document.getElementById('modalMainImg');
-    if (img) { img.style.transition = 'none'; img.style.transform = `translateX(${pointerDeltaX * 0.35}px)`; }
+    const img = getModalElement('#modalMainImg');
+    if (img) {
+      img.style.transition = 'none';
+      img.style.transform = `translateX(${pointerDeltaX * 0.35}px)`;
+    }
   }
 }
 
 function onGalleryPointerUp(e) {
-  if (!pointerActive) return;
-  pointerActive = false;
-  e.currentTarget.classList.remove('is-swiping');
-  
-  const img = document.getElementById('modalMainImg');
-  if (img) { img.style.transition = 'transform 0.2s ease'; img.style.transform = ''; }
+  if (!pointerActive || e.pointerId !== activeGalleryPointerId) return;
 
-  const horizontal = swipeLocked === 'h' || Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY);
-  if (horizontal && Math.abs(pointerDeltaX) >= 40) {
-    if (pointerDeltaX < 0) showModalImageByIndex(modalImageIndex + 1);
-    else showModalImageByIndex(modalImageIndex - 1);
+  const deltaX = pointerDeltaX;
+  const deltaY = pointerDeltaY;
+  const horizontal = swipeLocked === 'h' || Math.abs(deltaX) > Math.abs(deltaY);
+  const wasClick = Math.abs(deltaX) <= GALLERY_CLICK_TOLERANCE_PX && Math.abs(deltaY) <= GALLERY_CLICK_TOLERANCE_PX;
+  resetGalleryPointer(e.currentTarget);
+  try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+
+  if (horizontal && Math.abs(deltaX) >= GALLERY_SWIPE_TRIGGER_PX) {
+    showModalImageByIndex(deltaX < 0 ? modalImageIndex + 1 : modalImageIndex - 1);
+  } else if (wasClick && e.pointerType !== 'touch') {
+    // PC의 클릭은 pointerup에서 즉시 처리한다. click 이벤트와 별도로 처리하므로
+    // 썸네일만 활성화되고 메인 사진이 남아 있는 상태가 생기지 않는다.
+    showModalImageByIndex(modalImageIndex + 1);
   }
-  setTimeout(() => { pointerDeltaX = 0; pointerDeltaY = 0; swipeLocked = null; }, 50);
-  try { if (e.pointerId != null) e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+}
+
+function onGalleryPointerCancel(e) {
+  if (!pointerActive || e.pointerId !== activeGalleryPointerId) return;
+  resetGalleryPointer(e.currentTarget);
+  try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
 }
 
 function showModalImageByIndex(index) {
   if (!modalImages.length) return;
   modalImageIndex = ((index % modalImages.length) + modalImages.length) % modalImages.length;
   const imgData = modalImages[modalImageIndex];
-  const mainImg = document.getElementById('modalMainImg');
-  const badge = document.getElementById('modalImgBadge');
+  const mainImg = getModalElement('#modalMainImg');
+  const badge = getModalElement('#modalImgBadge');
 
-  if (mainImg) { mainImg.dataset.fallback = ''; mainImg.style.transition = 'none'; mainImg.style.transform = ''; mainImg.onerror = function () { handleImgError(mainImg); }; mainImg.src = imgData.url; }
+  if (mainImg) {
+    mainImg.dataset.fallback = '';
+    mainImg.style.transition = 'none';
+    mainImg.style.transform = '';
+    mainImg.onerror = () => handleImgError(mainImg);
+    mainImg.src = imgData.url;
+  }
   if (badge) badge.textContent = `${modalImageIndex + 1} / ${modalImages.length} (${imgData.listLabel || imgData.key})`;
 
   // 몇 번째 사진을 넘겨 보는지 집계 (P1-1) — 여러 장 확보한 효과의 증거
@@ -703,9 +828,10 @@ function showModalImageByIndex(index) {
     track('photo_swipe', getDesertionNo(allAnimals[currentDetailIndex]), { photo: modalImageIndex + 1 });
   }
 
-  document.querySelectorAll('.modal-thumb-btn').forEach((btn, i) => btn.classList.toggle('active', i === modalImageIndex));
-  const activeThumb = document.querySelector('.modal-thumb-btn.active');
-  if (activeThumb && activeThumb.scrollIntoView) activeThumb.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+  const modalBody = document.getElementById('modalBody');
+  modalBody?.querySelectorAll('.modal-thumb-btn').forEach((btn, i) => btn.classList.toggle('active', i === modalImageIndex));
+  const activeThumb = modalBody?.querySelector('.modal-thumb-btn.active');
+  if (activeThumb?.scrollIntoView) activeThumb.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
 }
 
 // ==============================================================
@@ -816,7 +942,12 @@ async function showDetail(index, opts = {}) {
   const desertionNo = getDesertionNo(animal);
 
   modalImages = mergeAllImagesSmart(baseImages, []);
-  modalImageIndex = 0; pointerActive = false; swipeLocked = null; pointerDeltaX = 0;
+  modalImageIndex = 0;
+  pointerActive = false;
+  activeGalleryPointerId = null;
+  swipeLocked = null;
+  pointerDeltaX = 0;
+  pointerDeltaY = 0;
   currentLogs = null;
 
   const noticePeriod = (animal.noticeSdt && animal.noticeEdt) ? `${formatDate(animal.noticeSdt)} ~ ${formatDate(animal.noticeEdt)}` : '정보 없음';
@@ -850,10 +981,14 @@ async function showDetail(index, opts = {}) {
 
     if (!isModalOpen || currentDetailIndex !== index) return;
 
+    const selectedImageUrl = modalImages[modalImageIndex]?.rawUrl || '';
     const merged = mergeAllImagesSmart(baseImages, extraUrls);
 
     modalImages = merged;
-    modalImageIndex = 0;
+    // 상세 사진이 비동기로 추가되는 동안 사용자가 이미 사진을 넘겼다면, 첫 장으로
+    // 되돌리지 않고 보고 있던 사진을 계속 보여 준다.
+    const selectedIndex = merged.findIndex((image) => image.rawUrl === selectedImageUrl);
+    modalImageIndex = selectedIndex >= 0 ? selectedIndex : 0;
     currentLogs = logs;
 
     renderModalContent(animal, index, kindTitle, stateText, noticePeriod);
@@ -883,7 +1018,7 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
             ${images.map((img, i) => `
               <button type="button"
                 class="modal-thumb-btn ${i === safeIndex ? 'active' : ''} ${img.isExtra ? 'is-extra' : 'is-origin'}"
-                onclick="event.stopPropagation(); selectModalImage(${i})"
+                data-image-index="${i}"
                 title="${img.listLabel || img.key}"
                 aria-label="${i + 1}번째 사진 보기">
                 <img src="${img.thumbUrl || img.url}" alt="" loading="lazy" decoding="async" onerror="handleImgError(this)" draggable="false">
@@ -1007,6 +1142,10 @@ function closeModal(options = {}) {
   modalImages = [];
   modalImageIndex = 0;
   pointerActive = false;
+  activeGalleryPointerId = null;
+  pointerDeltaX = 0;
+  pointerDeltaY = 0;
+  swipeLocked = null;
   currentLogs = null;
   if (!options.skipHashClear) {
     // /a/:id 로 들어와 자동으로 열렸던 경우: 닫으면 목록 주소로 돌아간다
@@ -1020,10 +1159,10 @@ function closeModal(options = {}) {
 
 function updateStats() {
   let dogs = 0, cats = 0, etc = 0;
-  allAnimals.forEach(a => {
-    const kind = a.kindFullNm || a.kindNm || a.kindCd || '';
-    if (kind.includes('개')) dogs++;
-    else if (kind.includes('고양이')) cats++;
+  allAnimals.forEach((animal) => {
+    const group = animalStatsGroup(animal);
+    if (group === 'dog') dogs++;
+    else if (group === 'cat') cats++;
     else etc++;
   });
   document.getElementById('totalCount').textContent = allAnimals.length;

@@ -19,7 +19,7 @@
 
   <!-- 아이콘 폰트 CDN 연결 미리 수립 — 첫 화면 렌더 지연 줄이기 -->
   <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
-  <link rel="stylesheet" href="css/style.css?v=1.4.2">
+  <link rel="stylesheet" href="css/style.css?v=1.4.3">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 </head>
 <body>
@@ -74,28 +74,28 @@
   <section class="stats">
     <div class="container">
       <div class="stats-grid">
-        <div class="stat-card total">
+        <div class="stat-card total" role="button" tabindex="0" aria-label="전체 보호중 동물 보기" aria-pressed="true">
           <i class="fas fa-home"></i>
           <div>
             <span class="stat-number" id="totalCount">0</span>
             <span class="stat-label">보호중 개체수</span>
           </div>
         </div>
-        <div class="stat-card dog">
+        <div class="stat-card dog" role="button" tabindex="0" aria-label="강아지 보호중 동물 보기" aria-pressed="false">
           <i class="fas fa-dog"></i>
           <div>
             <span class="stat-number" id="dogCount">0</span>
             <span class="stat-label">강아지</span>
           </div>
         </div>
-        <div class="stat-card cat">
+        <div class="stat-card cat" role="button" tabindex="0" aria-label="고양이 보호중 동물 보기" aria-pressed="false">
           <i class="fas fa-cat"></i>
           <div>
             <span class="stat-number" id="catCount">0</span>
             <span class="stat-label">고양이</span>
           </div>
         </div>
-        <div class="stat-card etc">
+        <div class="stat-card etc" role="button" tabindex="0" aria-label="기타 보호중 동물 보기" aria-pressed="false">
           <i class="fas fa-paw"></i>
           <div>
             <span class="stat-number" id="etcCount">0</span>
@@ -156,7 +156,7 @@
   </footer>
 
   <!--BOOT-->
-  <script src="js/app.js?v=1.4.2"></script>
+  <script src="js/app.js?v=1.4.3"></script>
 
   <!-- 서비스워커 등록 (P2: 웹앱 설치 — 홈 화면에 앱처럼 추가) -->
   <script>
