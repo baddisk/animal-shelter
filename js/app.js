@@ -2,6 +2,9 @@ const API_BASE = '/api';
 const ITEMS_PER_PAGE = 20;
 const MAX_GALLERY_IMAGES = 16;
 
+// P0-4: 용도별 이미지 요청 폭 — 목록 카드 400, 상세 큰 사진 1000, 썸네일 160
+const IMG_W = { card: 400, detail: 1000, thumb: 160 };
+
 let allAnimals = [];
 let currentStatsFilter = 'all';
 let currentStatusFilter = 'all';   // all | foster | adopting | news
@@ -57,10 +60,30 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// ==============================================================
+// 📈 P1-1: 조회/전환 기록 (개인정보는 담지 않고 집계값만 남긴다)
+//    sendBeacon 은 페이지를 닫아도 전송을 보장한다.
+//    이벤트: link_copy · link_share · detail_open · photo_swipe
+//            · detail_close · similar_click · reserve_click
+// ==============================================================
+function track(event, id, meta) {
+  try {
+    const payload = JSON.stringify({ event, id: id ?? null, meta: meta ?? {} });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(`${API_BASE}/track`, new Blob([payload], { type: 'application/json' }));
+    } else {
+      fetch(`${API_BASE}/track`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, keepalive: true });
+    }
+  } catch (_) { /* 기록 실패는 사용자 경험에 영향 주지 않음 */ }
+}
+
 // 로컬 경로(/img, /uploads)는 프록시 없이, 절대 URL은 이미지 프록시로
-function photoSrc(p) {
+// P0-4: w(폭)를 붙이면 서버가 그 크기의 WebP로 줄여서 내려준다.
+function photoSrc(p, w) {
   const s = String(p || '');
-  return s.startsWith('/') ? s : `${API_BASE}/image-proxy?url=${encodeURIComponent(s)}`;
+  if (s.startsWith('/')) return s;
+  const wq = w ? `&w=${w}` : '';
+  return `${API_BASE}/image-proxy?url=${encodeURIComponent(s)}${wq}`;
 }
 
 // 카드/상세 뱃지: 보호소가 지정한 상태(foster/adopting)가 API 상태보다 우선
@@ -88,7 +111,7 @@ document.addEventListener('DOMContentLoaded', () => {
     new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())
   );
 
-  pendingDetailId = parseDetailHash();
+  pendingDetailId = parseIncomingShareId();
   searchAnimals(false);
 
   document.getElementById('searchBtn').addEventListener('click', () => {
@@ -108,20 +131,30 @@ document.addEventListener('DOMContentLoaded', () => {
   setupInfiniteScroll();
   setupTopButton();
 
-  document.getElementById('modalClose').addEventListener('click', closeModal);
+  // 닫기 동작은 모두 closeDetail() 하나로 통일 (P0-3: 배경 클릭·X·ESC)
+  document.getElementById('modalClose').addEventListener('click', closeDetail);
   document.getElementById('modal').addEventListener('click', (e) => {
-    if (e.target === e.currentTarget) closeModal();
+    if (e.target === e.currentTarget) closeDetail();
   });
-  
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeModal();
+    if (e.key === 'Escape') closeDetail();
     if (isModalOpen && modalImages.length > 1) {
       if (e.key === 'ArrowRight') showModalImageByIndex(modalImageIndex + 1);
       if (e.key === 'ArrowLeft') showModalImageByIndex(modalImageIndex - 1);
     }
   });
-  
-  window.addEventListener('hashchange', handleHashChange);
+
+  // P0-3: 뒤로가기/앞으로가기(브라우저·안드로이드 하드웨어 버튼)를 popstate 하나로 처리
+  window.addEventListener('popstate', (e) => {
+    const id = (e.state && e.state.detail) || parseIncomingShareId();
+    if (id) {
+      if (allAnimals.length === 0) pendingDetailId = id;
+      else openDetailByShareId(id, { history: 'none' });
+    } else {
+      hideDetail();
+    }
+  });
 });
 
 function formatDateToYMD(date) {
@@ -155,36 +188,40 @@ function getShareId(animalOrNoticeNo) {
   return id;
 }
 
+// P0-2 ③ / P1-3: 공유 링크를 짧은 경로로 내보낸다.
+//  - 서버가 내려준 5자 단축 코드가 있으면 /p/:code (문자 45자 이내 유지에 유리)
+//  - 없으면 /a/:id 로 폴백 (둘 다 서버가 미리보기 OG 태그를 넣어 응답한다)
 function getDetailShareUrl(animal) {
+  if (animal && animal.shortCode) return `${window.location.origin}/p/${animal.shortCode}`;
   const id = getShareId(animal);
-  if (!id) return window.location.origin + window.location.pathname;
-  return `${window.location.origin}${window.location.pathname}#detail/${id}`;
+  if (!id) return window.location.origin + '/';
+  return `${window.location.origin}/a/${id}`;
 }
 
-function parseDetailHash() {
-  const m = (window.location.hash || '').match(/^#detail\/([^/?#]+)/i);
-  if (!m) return null;
-  try {
-    return decodeURIComponent(m[1]).trim();
-  } catch {
-    return m[1].trim();
-  }
+// 들어오는 주소에서 공유 id 파악
+//  - 서버가 /a/:id 진입 시 주입한 window.__OPEN_ID 우선
+//  - 신규 경로 /a/:id, 구형 해시 #detail/:id 모두 하위 호환 지원
+function parseIncomingShareId() {
+  if (window.__OPEN_ID) return String(window.__OPEN_ID).trim();
+  const p = (window.location.pathname || '').match(/^\/a\/([^/?#]+)/i);
+  if (p) { try { return decodeURIComponent(p[1]).trim(); } catch { return p[1].trim(); } }
+  const h = (window.location.hash || '').match(/^#detail\/([^/?#]+)/i);
+  if (h) { try { return decodeURIComponent(h[1]).trim(); } catch { return h[1].trim(); } }
+  return null;
 }
 
-function setDetailHash(shareId) {
-  const next = shareId ? `#detail/${shareId}` : '';
-  if ((window.location.hash || '') === next) return;
-  if (next) history.replaceState(null, '', next);
-  else history.replaceState(null, '', window.location.pathname + window.location.search);
-}
-
-function openDetailByShareId(shareId) {
-  if (!shareId) return false;
+function findIndexByShareId(shareId) {
   const target = String(shareId).trim().toLowerCase();
-  const idx = allAnimals.findIndex(a => {
+  return allAnimals.findIndex((a) => {
     const id = getShareId(a).toLowerCase();
     return id && (id === target || id.endsWith(target) || target.endsWith(id));
   });
+}
+
+// 필요한 페이지까지 펼친 뒤 상세를 연다. opts.history: 'push'(기본) | 'none'
+function openDetailByShareId(shareId, opts = {}) {
+  if (!shareId) return false;
+  const idx = findIndexByShareId(shareId);
   if (idx < 0) return false;
 
   const filtered = getFilteredAnimals();
@@ -196,18 +233,8 @@ function openDetailByShareId(shareId) {
       renderPage(true);
     }
   }
-  showDetail(idx);
+  showDetail(idx, opts);
   return true;
-}
-
-function handleHashChange() {
-  const id = parseDetailHash();
-  if (id) {
-    if (allAnimals.length === 0) pendingDetailId = id;
-    else openDetailByShareId(id);
-  } else if (isModalOpen) {
-    closeModal({ skipHashClear: true });
-  }
 }
 
 async function searchAnimals(forceRefresh = false) {
@@ -239,7 +266,8 @@ async function searchAnimals(forceRefresh = false) {
     updateStatusChips();
     
     if (pendingDetailId) {
-      openDetailByShareId(pendingDetailId);
+      // 딥링크 첫 진입: 현재 주소가 이미 그 개체이므로 기록을 새로 쌓지 않는다
+      openDetailByShareId(pendingDetailId, { history: 'none' });
       pendingDetailId = null;
     }
     if (forceRefresh) extraImagesCache.clear();
@@ -349,18 +377,13 @@ function extractAllImages(animal) {
   const push = (raw, key) => {
     if (!raw || typeof raw !== 'string') return;
     const cleanUrl = raw.trim();
-    
-    let proxied = null;
-    if (/^https?:\/\//i.test(cleanUrl)) {
-      proxied = `${API_BASE}/image-proxy?url=${encodeURIComponent(cleanUrl)}`;
-    } else if (cleanUrl.startsWith('/')) {
-      proxied = cleanUrl; // 데모/로컬 업로드 이미지
-    }
-    if (!proxied) return;
-    
+
+    if (!/^https?:\/\//i.test(cleanUrl) && !cleanUrl.startsWith('/')) return;
+
+    // 상세 큰 사진은 1000px WebP로 요청 (P0-4)
     list.push({
       key,
-      url: proxied,
+      url: photoSrc(cleanUrl, IMG_W.detail),
       rawUrl: cleanUrl,
       filename: getFilenameFromUrl(cleanUrl),
       isExtra: false,
@@ -403,7 +426,7 @@ function mergeAllImagesSmart(baseImages, extraRawUrls) {
     merged.push({
       num: merged.length + 1,
       key: `crawl${idx + 1}`,
-      url: photoSrc(clean),
+      url: photoSrc(clean, IMG_W.detail),
       rawUrl: clean,
       filename: fn,
       isExtra: true,
@@ -430,8 +453,9 @@ async function fetchExtraImages(desertionNo) {
 }
 
 function getThumbnailUrl(animal) {
+  // 목록 카드는 작게(400px) 요청해 첫 화면 전송량을 크게 줄인다 (P0-4)
   const images = extractAllImages(animal);
-  return images.length > 0 ? images[0].url : PLACEHOLDER_SVG;
+  return images.length > 0 ? photoSrc(images[0].rawUrl, IMG_W.card) : PLACEHOLDER_SVG;
 }
 
 function setupInfiniteScroll() {
@@ -483,7 +507,9 @@ function renderPage(isAppend = false) {
     const mngSuffix = getDesertionNo(animal).slice(-5); // 관리번호 뒷자리 5자리
 
     return `
-      <div class="animal-card" onclick="showDetail(${realIndex})">
+      <div class="animal-card" role="button" tabindex="0" aria-label="${escapeHtml((animal.noticeNo || '') + ' ' + kindText)} 상세보기"
+           onclick="showDetail(${realIndex})"
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showDetail(${realIndex});}">
         <div class="card-image">
           <img src="${imgSrc}" alt="${kindText}" loading="lazy" onerror="handleImgError(this)">
           <span class="card-badge ${badge.cls}" title="${escapeHtml(animal.processState || '')}">${badge.text}</span>
@@ -588,6 +614,10 @@ function showModalImageByIndex(index) {
   document.querySelectorAll('.modal-thumb-btn').forEach((btn, i) => btn.classList.toggle('active', i === modalImageIndex));
   const activeThumb = document.querySelector('.modal-thumb-btn.active');
   if (activeThumb && activeThumb.scrollIntoView) activeThumb.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+
+  // P1-1: 사진 넘김 기록 — 몇 번째 사진까지 봤는지(사진 완주율의 근거)
+  const a = allAnimals[currentDetailIndex];
+  if (a) track('photo_swipe', getShareId(a), { index: modalImageIndex + 1, total: modalImages.length });
 }
 
 // ==============================================================
@@ -683,7 +713,7 @@ function timelineHtml(animal, logs) {
 // ==============================================================
 // 🎯 상세 모달
 // ==============================================================
-async function showDetail(index) {
+async function showDetail(index, opts = {}) {
   const animal = allAnimals[index];
   if (!animal) return;
 
@@ -705,7 +735,17 @@ async function showDetail(index) {
   document.getElementById('modal').style.display = 'flex';
   document.body.style.overflow = 'hidden';
   isModalOpen = true;
-  if (shareId) setDetailHash(shareId);
+
+  // P0-3: 상세를 열 때 브라우저 기록을 쌓아 "뒤로가기 = 목록으로 복귀"가 되게 한다.
+  //  - 딥링크 첫 진입 등 history:'none' 이면 기록을 건드리지 않는다.
+  //  - 이미 상세가 열린 상태에서 다른 개체로 넘어가면 replace, 처음 열면 push
+  if (opts.history !== 'none' && shareId) {
+    const fn = (history.state && history.state.detail) ? 'replaceState' : 'pushState';
+    history[fn]({ detail: shareId }, '', `/a/${shareId}`);
+  }
+
+  // P1-1: 상세 열람 기록 (유입 경로 = 링크/목록)
+  track('detail_open', shareId, { via: opts.history === 'none' ? 'link' : 'list' });
 
   if (desertionNo) {
     const [extraUrls, logs] = await Promise.all([
@@ -750,7 +790,7 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
                 class="modal-thumb-btn ${i === safeIndex ? 'active' : ''} ${img.isExtra ? 'is-extra' : 'is-origin'}"
                 onclick="event.stopPropagation(); selectModalImage(${i})"
                 title="${img.listLabel || img.key}">
-                <img src="${img.url}" alt="${i + 1}" onerror="handleImgError(this)" draggable="false">
+                <img src="${photoSrc(img.rawUrl, IMG_W.thumb)}" alt="${i + 1}" onerror="handleImgError(this)" draggable="false">
                 <span class="thumb-num">${i + 1}</span>
                 ${img.isExtra ? '<span class="thumb-extra-badge">C</span>' : '<span class="thumb-origin-badge">J</span>'}
               </button>
@@ -773,7 +813,7 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
     <div class="modal-detail">
       <div class="modal-title-row">
         <h2>${animal.noticeNo || '공고'} (${kindTitle})</h2>
-        <button type="button" class="btn-share-link" onclick="copyDetailLink(${index})"><i class="fas fa-link"></i> 링크 복사</button>
+        <button type="button" class="btn-share-link" onclick="copyDetailLink(${index})"><i class="fas fa-share-nodes"></i> ${navigator.share ? '공유하기' : '링크 복사'}</button>
       </div>
 
       <div class="detail-grid">
@@ -794,7 +834,7 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
         <div class="detail-grid shelter-grid">
           <div class="detail-item full"><span class="label">보호센터명</span><span class="value" style="font-weight:bold;">${animal.careNm || '강화군 동물보호센터'}</span></div>
           <div class="detail-item full"><span class="label">보호소 주소</span><span class="value">${animal.careAddr || '인천광역시 강화군'}</span></div>
-          <div class="detail-item"><span class="label">전화번호</span><span class="value">${animal.careTel ? `<a href="tel:${animal.careTel}" style="color:#FF6B35; font-weight:bold; font-size:1.05rem;">📞 ${animal.careTel}</a>` : '정보 없음'}</span></div>
+          <div class="detail-item"><span class="label">전화번호</span><span class="value">${animal.careTel ? `<a href="tel:${animal.careTel}" style="color:#FF6B35; font-weight:bold; font-size:1.05rem;" onclick="track('reserve_click', '${getShareId(animal)}')">📞 ${animal.careTel}</a>` : '정보 없음'}</span></div>
           <div class="detail-item"><span class="label">관할 부서</span><span class="value">${animal.orgNm || '강화군'} (${animal.officetel || animal.chargeNm || '문의'})</span></div>
         </div>
 
@@ -817,23 +857,58 @@ window.selectModalImage = function (idx) {
   if (typeof idx === 'number' && idx >= 0 && idx < modalImages.length) showModalImageByIndex(idx);
 };
 
+// P1-4: 휴대폰에서는 공유 시트(카카오톡/문자로 보내기)를 바로 띄우고,
+//        지원하지 않는 브라우저(주로 PC)에서는 클립보드 복사로 폴백한다.
 window.copyDetailLink = async function (index) {
   const animal = allAnimals[index];
   if (!animal) return;
   const url = getDetailShareUrl(animal);
+  const id = getShareId(animal);
+  const name = `${animal.noticeNo || ''} ${formatKind(animal.kindFullNm || animal.kindNm || '')}`.trim();
   const btn = document.querySelector('.btn-share-link');
+
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: name || '보호중인 아이', text: '보호중인 아이 정보입니다', url });
+      track('link_share', id);       // P1-1
+      return;
+    } catch (_) { /* 사용자가 공유 취소 → 복사 폴백으로 진행 */ }
+  }
+
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(url);
     else {
       const ta = document.createElement('textarea'); ta.value = url; ta.style.position = 'fixed'; ta.style.left = '-9999px';
       document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
     }
+    track('link_copy', id);          // P1-1
     if (btn) { const prev = btn.innerHTML; btn.classList.add('copied'); btn.innerHTML = '<i class="fas fa-check"></i> 복사됨!'; setTimeout(() => { btn.innerHTML = prev; }, 1800); }
   } catch (_) { alert('링크: ' + url); }
 };
 
-function closeModal(options = {}) {
-  document.getElementById('modal').style.display = 'none';
+// P0-3: 닫기 버튼/배경/ESC → 직접 닫지 않고 뒤로가기를 호출한다.
+//  - 상세를 열며 쌓아둔 기록이 있으면 history.back()이 popstate를 일으켜 실제로 닫힘
+//  - 딥링크 첫 진입 등 기록이 없으면 곧바로 hideDetail()
+function closeDetail() {
+  if (history.state && history.state.detail) {
+    history.back();
+  } else {
+    hideDetail();
+    // 주소에 남아있는 /a/:id 를 목록 주소로 정리 (기록은 더 쌓지 않음)
+    if (/^\/a\//i.test(window.location.pathname) || /^#detail\//i.test(window.location.hash || '')) {
+      history.replaceState(null, '', '/');
+    }
+  }
+}
+
+// 실제로 닫는 동작은 여기 하나로 모은다 (P0-3)
+function hideDetail() {
+  const modal = document.getElementById('modal');
+  if (isModalOpen && currentDetailIndex >= 0) {
+    const a = allAnimals[currentDetailIndex];
+    if (a) track('detail_close', getShareId(a)); // P1-1: 열람 종료
+  }
+  modal.style.display = 'none';
   document.body.style.overflow = '';
   isModalOpen = false;
   currentDetailIndex = -1;
@@ -841,7 +916,6 @@ function closeModal(options = {}) {
   modalImageIndex = 0;
   pointerActive = false;
   currentLogs = null;
-  if (!options.skipHashClear) setDetailHash('');
 }
 
 function updateStats() {
