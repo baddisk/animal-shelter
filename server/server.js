@@ -779,6 +779,42 @@ async function imgDiskGet(key) {
   return null;
 }
 
+// 폭별 변형(160/400/1000)은 캐시 키가 서로 다르다. 이전에는 각 변형이
+// 국가동물보호시스템 원본을 다시 내려받았으므로 썸네일을 본 뒤 메인 사진을
+// 눌러도 같은 원본 다운로드를 한 번 더 기다려야 했다. 원본 자체도 메모리와
+// 디스크에 저장하고, 동시 요청은 imgInflight로 한 번만 수행한다.
+async function getOriginalImage(rawUrl) {
+  const sourceKey = imgKey(rawUrl, 0, 'source');
+  const mem = imgMem.get(sourceKey);
+  if (mem) return mem;
+
+  const running = imgInflight.get(sourceKey);
+  if (running) return running;
+
+  const job = (async () => {
+    const disk = await imgDiskGet(sourceKey);
+    if (disk) {
+      imgMemSet(sourceKey, disk.buf, disk.type);
+      return disk;
+    }
+
+    const original = await fetchOriginalImage(rawUrl);
+    if (!original) throw new Error('IMAGE_NOT_FOUND');
+    imgMemSet(sourceKey, original.buf, original.type);
+
+    const ext = EXT_OF_TYPE[original.type];
+    if (ext) {
+      fs.promises.writeFile(imgDiskPath(sourceKey, ext), original.buf)
+        .then(() => scheduleImgDiskSweep())
+        .catch(() => {});
+    }
+    return original;
+  })().finally(() => imgInflight.delete(sourceKey));
+
+  imgInflight.set(sourceKey, job);
+  return job;
+}
+
 let imgDiskSweepTimer = null;
 function scheduleImgDiskSweep() {
   if (imgDiskSweepTimer) return;
@@ -856,8 +892,7 @@ async function getImageVariant(rawUrl, w, wantsWebp) {
       return { ...disk, etag: key };
     }
 
-    const orig = await fetchOriginalImage(rawUrl);
-    if (!orig) throw new Error('IMAGE_NOT_FOUND');
+    const orig = await getOriginalImage(rawUrl);
 
     let out = orig;
     if (canResize && (orig.type === 'image/jpeg' || orig.type === 'image/png' || orig.type === 'image/webp')) {
@@ -912,6 +947,19 @@ function warmCardImages(items) {
   })();
 }
 
+// 상세 URL을 찾은 직후 160px 썸네일 생성을 시작한다. 응답은 기다리지 않고
+// 즉시 보내며, 브라우저 요청이 뒤따르면 getImageVariant의 단일 비행에 합류한다.
+function warmDetailImages(urls) {
+  if (!sharp || !Array.isArray(urls) || !urls.length) return;
+  (async () => {
+    for (let i = 0; i < urls.length; i += 4) {
+      await Promise.all(urls.slice(i, i + 4).map((url) =>
+        getImageVariant(url, 160, true).catch(() => {})
+      ));
+    }
+  })();
+}
+
 app.get('/api/image-proxy', async (req, res) => {
   const imageUrl = req.query.url;
   if (!imageUrl || imageUrl === 'undefined') return res.status(400).send('URL 오류');
@@ -942,39 +990,33 @@ app.get('/api/image-proxy', async (req, res) => {
 // ==============================================================
 async function fetchDetailHtml(desertionNo) {
   const id = encodeURIComponent(String(desertionNo));
-  const chunks = [];
-
   const gets = [
     `https://www.animal.go.kr/front/awtis/public/publicDtl.do?desertionNo=${id}&fileListCnt=50&pageSize=50`,
     `https://www.animal.go.kr/front/awtis/public/publicDtl.do?desertionNo=${id}`,
     `https://www.animal.go.kr/front/awtis/protection/protectionDtl.do?desertionNo=${id}`
   ];
+  const body = new URLSearchParams({
+    desertionNo: String(desertionNo),
+    fileListCnt: '50',
+    pageSize: '50'
+  });
 
-  for (const url of gets) {
-    try {
-      const r = await axios.get(url, {
-        timeout: 10000,
-        httpsAgent,
-        httpAgent,
-        headers: BROWSER_HEADERS,
-        responseType: 'text',
-        decompress: true
-      });
-      if (r.data && String(r.data).length > 400) chunks.push(String(r.data));
-    } catch (_) {}
-  }
-
-  try {
-    const body = new URLSearchParams({
-      desertionNo: String(desertionNo),
-      fileListCnt: '50',
-      pageSize: '50'
-    });
-    const r = await axios.post(
+  // 과거에는 GET 3회와 POST 1회를 차례로 기다려 최악의 경우 40초가 걸렸다.
+  // 서로 독립적인 폴백 요청이므로 병렬 실행하고 성공한 HTML만 순서대로 합친다.
+  const requests = [
+    ...gets.map((url) => axios.get(url, {
+      timeout: 8000,
+      httpsAgent,
+      httpAgent,
+      headers: BROWSER_HEADERS,
+      responseType: 'text',
+      decompress: true
+    })),
+    axios.post(
       'https://www.animal.go.kr/front/awtis/public/publicDtl.do',
       body.toString(),
       {
-        timeout: 10000,
+        timeout: 8000,
         httpsAgent,
         httpAgent,
         headers: {
@@ -983,9 +1025,14 @@ async function fetchDetailHtml(desertionNo) {
         },
         responseType: 'text'
       }
-    );
-    if (r.data && String(r.data).length > 400) chunks.push(String(r.data));
-  } catch (_) {}
+    )
+  ];
+
+  const settled = await Promise.allSettled(requests);
+  const chunks = settled
+    .filter((result) => result.status === 'fulfilled')
+    .map((result) => String(result.value?.data || ''))
+    .filter((html) => html.length > 400);
 
   return decodeHtmlEntities(chunks.join('\n'));
 }
@@ -1090,6 +1137,7 @@ app.get('/api/detail-images', async (req, res) => {
 
   const cached = detailImageCache.get(desertionNo);
   if (cached && Date.now() - cached.timestamp < DETAIL_CACHE_TTL) {
+    warmDetailImages(cached.images);
     return res.json({
       images: cached.images,
       fromCache: true,
@@ -1102,17 +1150,23 @@ app.get('/api/detail-images', async (req, res) => {
     const html = await fetchDetailHtml(desertionNo);
     if (!html) return res.json({ images: [], error: '상세페이지 접근 실패', count: 0 });
 
-    let fromHtml = extractShelterPathsFromHtml(html);
-    const { fId } = extractFIdAndSeqs(html);
+    const fromHtml = extractShelterPathsFromHtml(html);
+    const { fId, seqs } = extractFIdAndSeqs(html);
+    const fromKnownSequences = fId
+      ? seqs.map((seq) => `https://www.animal.go.kr/query.do?pid=desertion_shelter&cmd=fileDownload&f_id=${fId}&f_seq=${seq}`)
+      : [];
 
-    let fromProbing = [];
-    if (fId) {
-      fromProbing = await probeFileSequences(fId);
+    let merged = dedupeKeepOrder([...fromHtml, ...fromKnownSequences]).slice(0, 16);
+
+    // HTML에 파일 경로나 명시적인 f_seq가 없을 때만 12개 번호를 탐색한다.
+    // 이미 사진 목록을 확보했는데도 최대 5초의 probe를 항상 기다리던 병목을 제거한다.
+    if (fId && merged.length <= 1) {
+      const fromProbing = await probeFileSequences(fId);
+      merged = dedupeKeepOrder([...merged, ...fromProbing]).slice(0, 16);
     }
 
-    const merged = dedupeKeepOrder([...fromHtml, ...fromProbing]).slice(0, 16);
-
     detailImageCache.set(desertionNo, { timestamp: Date.now(), images: merged });
+    warmDetailImages(merged);
 
     console.log(
       `🕷️ [크롤링] desertionNo=${desertionNo} → 총 ${merged.length}장 수집 성공 | ` +
