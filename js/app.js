@@ -41,7 +41,8 @@ const PLACEHOLDER_SVG = 'data:image/svg+xml,' + encodeURIComponent(
   </svg>`
 );
 
-const SHELTER_LOGO_SRC = 'logo.svg';
+// /a/:id 같은 경로형 공유 페이지에서도 /logo.svg를 가리켜야 한다.
+const SHELTER_LOGO_SRC = '/logo.svg';
 
 // ==============================================================
 // 🆕 상태 오버레이 + 케어 타임라인

@@ -19,7 +19,8 @@
 
   <!-- 아이콘 폰트 CDN 연결 미리 수립 — 첫 화면 렌더 지연 줄이기 -->
   <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
-  <link rel="stylesheet" href="css/style.css?v=1.4.3">
+  <!-- 경로형 공유 URL(/a/:id)에서도 /css 로 해석되도록 루트 절대경로 사용 -->
+  <link rel="stylesheet" href="/css/style.css?v=1.4.4">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 </head>
 <body>
@@ -156,7 +157,8 @@
   </footer>
 
   <!--BOOT-->
-  <script src="js/app.js?v=1.4.3"></script>
+  <!-- /a/:id 에서도 /js/app.js를 요청하도록 루트 절대경로 사용 -->
+  <script src="/js/app.js?v=1.4.4"></script>
 
   <!-- 서비스워커 등록 (P2: 웹앱 설치 — 홈 화면에 앱처럼 추가) -->
   <script>
