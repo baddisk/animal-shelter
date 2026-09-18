@@ -123,11 +123,11 @@ body {
 .modal-content { background: white; border-radius: var(--radius); max-width: 720px; width: 100%; max-height: min(92vh, 92dvh); overflow-x: hidden; overflow-y: auto; position: relative; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; box-shadow: 0 20px 40px rgba(0,0,0,0.25); }
 .modal-close { position: absolute; top: 10px; right: 10px; width: 36px; height: 36px; border: none; background: rgba(0,0,0,0.6); color: white; border-radius: 50%; font-size: 1.2rem; cursor: pointer; z-index: 30; display: flex; align-items: center; justify-content: center; touch-action: manipulation; }
 
-.modal-gallery-wrapper { width: 100%; background: #0F172A; }
+.modal-gallery-wrapper { width: 100%; background: #1E293B; }
 
 .modal-main-image-box {
   position: relative; width: 100%; height: min(420px, 52vh); min-height: 240px;
-  background: #0F172A; display: flex; align-items: center; justify-content: center;
+  background: #1E293B; display: flex; align-items: center; justify-content: center;
   overflow: hidden; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   touch-action: pan-y; cursor: default;
 }
