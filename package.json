@@ -1,6 +1,6 @@
 {
   "name": "ganghwa-shelter",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "private": true,
   "description": "강화유기동물보호센터 - 보호중 유기동물 정보·입양 안내 사이트",
   "main": "server/server.js",
