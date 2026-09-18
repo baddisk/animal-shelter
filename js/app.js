@@ -20,8 +20,18 @@ let pointerStartX = 0;
 let pointerStartY = 0;
 let pointerDeltaX = 0;
 let pointerDeltaY = 0;
+let pointerStartAt = 0;
 let pointerActive = false;
+let pointerId = null;
+let pointerType = '';
 let swipeLocked = null;
+
+// 갤러리 전환 상태. 선택 즉시 작은 미리보기를 표시하고, 큰 이미지는
+// 백그라운드에서 디코딩한 뒤 같은 <img>에 교체한다.
+let modalImageLoadToken = 0;
+let isModalGalleryLoading = false;
+const modalFullImageLoads = new Map(); // url → Promise (브라우저 중복 다운로드 방지)
+const extraImagesInflight = new Map();
 
 const PLACEHOLDER_SVG = 'data:image/svg+xml,' + encodeURIComponent(
   `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
@@ -155,7 +165,16 @@ document.addEventListener('DOMContentLoaded', () => {
     searchAnimals(true);
   });
   
-  ['upkind', 'bgnde', 'endde'].forEach((id) => {
+  // 축종 목록은 서버에서 전체를 받아 브라우저에서 즉시 필터링한다.
+  // 그래야 보호중 개체수는 항상 전체값을 유지하면서 선택 축종 카드만 강조할 수 있다.
+  document.getElementById('upkind').addEventListener('change', () => {
+    currentStatsFilter = statsFilterFromUpkind(document.getElementById('upkind').value);
+    currentPage = 1;
+    updateStatsActiveCard();
+    renderPage(false);
+  });
+
+  ['bgnde', 'endde'].forEach((id) => {
     document.getElementById(id).addEventListener('change', () => {
       currentPage = 1;
       searchAnimals(false);
@@ -309,14 +328,24 @@ function handlePopState() {
   }
 }
 
+function statsFilterFromUpkind(upkind) {
+  return ({ '417000': 'dog', '422400': 'cat', '429900': 'etc' })[String(upkind || '')] || 'all';
+}
+
+function upkindFromStatsFilter(statsFilter) {
+  return ({ dog: '417000', cat: '422400', etc: '429900' })[statsFilter] || '';
+}
+
 async function searchAnimals(forceRefresh = false) {
   showLoading(true);
   if (forceRefresh) setSearchBtnLoading(true);
 
   const bgnde = document.getElementById('bgnde').value;
   const endde = document.getElementById('endde').value;
-  const upkind = document.getElementById('upkind').value;
-  const params = new URLSearchParams({ bgnde, endde, upkind });
+
+  // upkind를 API 요청에서 제외한다. 전체 목록을 보유해야 통계의 "보호중
+  // 개체수"가 축종 필터에 따라 줄어들지 않고, 축종별 숫자도 정확히 유지된다.
+  const params = new URLSearchParams({ bgnde, endde });
   if (forceRefresh) params.append('refresh', '1');
 
   try {
@@ -326,7 +355,8 @@ async function searchAnimals(forceRefresh = false) {
     const result = await response.json();
     
     allAnimals = result.items || [];
-    currentStatsFilter = 'all';
+    // 요청 도중 축종 선택이 바뀌어도 응답 시점의 최신 선택을 강조한다.
+    currentStatsFilter = statsFilterFromUpkind(document.getElementById('upkind').value);
     currentStatusFilter = 'all';
     currentPage = 1;
     
@@ -343,7 +373,8 @@ async function searchAnimals(forceRefresh = false) {
       pendingDetailId = null;
       pendingDetailSource = null;
     }
-    if (forceRefresh) extraImagesCache.clear();
+    // 목록 강제 새로고침과 상세 사진(서버 30분 TTL)은 별도 캐시다.
+    // 상세 Map을 여기서 지우면 방금 본 카드를 다시 열 때 불필요한 요청이 생긴다.
   } catch (error) {
     console.error('데이터 조회 실패:', error);
     allAnimals = [];
@@ -377,6 +408,8 @@ function setupStatsFilterEvents() {
       el.addEventListener('click', () => {
         currentStatsFilter = type === 'total' ? 'all' : type;
         currentPage = 1;
+        const upkind = document.getElementById('upkind');
+        if (upkind) upkind.value = upkindFromStatsFilter(currentStatsFilter);
         updateStatsActiveCard();
         renderPage(false);
       });
@@ -463,6 +496,9 @@ function extractAllImages(animal) {
     list.push({
       key,
       url,
+      // 첫 장은 카드에서 이미 받은 400px 변형을 즉시 재사용하고,
+      // 썸네일 선택 시에는 160px 이미지를 먼저 보여 준다.
+      previewUrl: /^https?:\/\//i.test(cleanUrl) ? photoSrc(cleanUrl, 400) : url,
       thumbUrl: /^https?:\/\//i.test(cleanUrl) ? photoSrc(cleanUrl, 160) : url,
       rawUrl: cleanUrl,
       filename: getFilenameFromUrl(cleanUrl),
@@ -508,6 +544,7 @@ function mergeAllImagesSmart(baseImages, extraRawUrls) {
       num: merged.length + 1,
       key: `crawl${idx + 1}`,
       url: local ? clean : photoSrc(clean, 1000),
+      previewUrl: local ? clean : photoSrc(clean, 400),
       thumbUrl: local ? clean : photoSrc(clean, 160),
       rawUrl: clean,
       filename: fn,
@@ -522,18 +559,31 @@ function mergeAllImagesSmart(baseImages, extraRawUrls) {
 async function fetchExtraImages(desertionNo) {
   if (!desertionNo) return [];
   const key = String(desertionNo);
-  // ⚠️ refresh 를 강제하지 않는다 — 서버의 30분 크롤링 캐시를 써야
-  // 상세 사진이 바로 뜬다. (매번 재크롤링하면 사진이 수 초 늦어졌다)
+
+  // 빈 배열도 정상 캐시값이다. 기존 코드는 Map에 저장만 하고 읽지 않아 같은
+  // 카드를 다시 열 때마다 detail-images 요청을 반복했다.
+  if (extraImagesCache.has(key)) return extraImagesCache.get(key);
+  if (extraImagesInflight.has(key)) return extraImagesInflight.get(key);
+
+  // refresh 를 강제하지 않는다 — 서버의 크롤링 캐시를 사용한다.
   const q = new URLSearchParams({ desertionNo: key });
-  try {
-    const response = await fetch(`${API_BASE}/detail-images?${q}`, { cache: 'no-store' });
-    const result = await response.json();
-    const images = Array.isArray(result.images) ? result.images : [];
-    extraImagesCache.set(key, images);
-    return images;
-  } catch (err) {
-    return [];
-  }
+  const job = (async () => {
+    try {
+      const response = await fetch(`${API_BASE}/detail-images?${q}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`detail-images ${response.status}`);
+      const result = await response.json();
+      const images = Array.isArray(result.images) ? result.images : [];
+      extraImagesCache.set(key, images);
+      return images;
+    } catch (_) {
+      return [];
+    } finally {
+      extraImagesInflight.delete(key);
+    }
+  })();
+
+  extraImagesInflight.set(key, job);
+  return job;
 }
 
 // 카드 대표 이미지 — w=400(기본) / 800(고해상도) (P0-4)
@@ -630,62 +680,160 @@ function renderPage(isAppend = false) {
 function setupModalImageNavigation() {
   const mainBox = document.querySelector('.modal-main-image-box');
   if (!mainBox) return;
-  if (modalImages.length <= 1) { mainBox.classList.remove('has-multiple'); mainBox.style.touchAction = ''; return; }
 
-  mainBox.classList.add('has-multiple');
-  mainBox.style.touchAction = 'none';
+  const multiple = modalImages.length > 1;
+  mainBox.classList.toggle('has-multiple', multiple);
 
-  const fresh = mainBox.cloneNode(true);
-  mainBox.parentNode.replaceChild(fresh, mainBox);
-  const imgEl = fresh.querySelector('img'); if (imgEl) imgEl.id = 'modalMainImg';
-  const badgeEl = fresh.querySelector('.modal-img-badge'); if (badgeEl) badgeEl.id = 'modalImgBadge';
+  // addEventListener를 매 렌더마다 누적하지 않고 프로퍼티를 교체한다. 기존의
+  // cloneNode 방식은 메인 이미지를 다시 만들며 디코딩/페인트를 지연시켰다.
+  mainBox.onpointerdown = multiple ? onGalleryPointerDown : null;
+  mainBox.onpointermove = multiple ? onGalleryPointerMove : null;
+  mainBox.onpointerup = multiple ? onGalleryPointerUp : null;
+  mainBox.onpointercancel = multiple ? onGalleryPointerCancel : null;
 
-  fresh.addEventListener('click', (e) => {
-    if (window.matchMedia('(hover: hover) and (pointer: fine)').matches && Math.abs(pointerDeltaX) <= 10) {
-      e.preventDefault(); showModalImageByIndex(modalImageIndex + 1);
-    }
-  });
+  upgradeModalMainImage(modalImageIndex);
+}
 
-  fresh.addEventListener('pointerdown', onGalleryPointerDown);
-  fresh.addEventListener('pointermove', onGalleryPointerMove);
-  fresh.addEventListener('pointerup', onGalleryPointerUp);
-  fresh.addEventListener('pointercancel', onGalleryPointerUp);
+function resetGalleryPointer(target) {
+  pointerActive = false;
+  pointerId = null;
+  pointerType = '';
+  swipeLocked = null;
+  pointerDeltaX = 0;
+  pointerDeltaY = 0;
+  if (target) target.classList.remove('is-swiping');
+  const img = document.getElementById('modalMainImg');
+  if (img) {
+    img.style.transition = 'transform 100ms ease-out';
+    img.style.transform = '';
+  }
 }
 
 function onGalleryPointerDown(e) {
-  if (modalImages.length <= 1 || (e.pointerType === 'mouse' && e.button !== 0)) return;
-  pointerActive = true; swipeLocked = null; pointerStartX = e.clientX; pointerStartY = e.clientY; pointerDeltaX = 0; pointerDeltaY = 0;
+  if (modalImages.length <= 1 || pointerActive || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  pointerActive = true;
+  pointerId = e.pointerId;
+  pointerType = e.pointerType || 'mouse';
+  pointerStartAt = performance.now();
+  swipeLocked = null;
+  pointerStartX = e.clientX;
+  pointerStartY = e.clientY;
+  pointerDeltaX = 0;
+  pointerDeltaY = 0;
   try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
   e.currentTarget.classList.add('is-swiping');
 }
 
 function onGalleryPointerMove(e) {
-  if (!pointerActive) return;
-  pointerDeltaX = e.clientX - pointerStartX; pointerDeltaY = e.clientY - pointerStartY;
-  if (!swipeLocked && (Math.abs(pointerDeltaX) > 8 || Math.abs(pointerDeltaY) > 8)) swipeLocked = Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY) ? 'h' : 'v';
-  
+  if (!pointerActive || e.pointerId !== pointerId) return;
+  pointerDeltaX = e.clientX - pointerStartX;
+  pointerDeltaY = e.clientY - pointerStartY;
+
+  if (!swipeLocked && Math.hypot(pointerDeltaX, pointerDeltaY) >= 6) {
+    // 대각선에서 세로 스크롤이 사진 넘김으로 오인되지 않도록 약간의 축 편향을 둔다.
+    swipeLocked = Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY) * 1.08 ? 'h' : 'v';
+  }
+
   if (swipeLocked === 'h') {
     e.preventDefault();
     const img = document.getElementById('modalMainImg');
-    if (img) { img.style.transition = 'none'; img.style.transform = `translateX(${pointerDeltaX * 0.35}px)`; }
+    if (img) {
+      img.style.transition = 'none';
+      img.style.transform = `translate3d(${pointerDeltaX * 0.32}px, 0, 0)`;
+    }
   }
 }
 
 function onGalleryPointerUp(e) {
-  if (!pointerActive) return;
-  pointerActive = false;
-  e.currentTarget.classList.remove('is-swiping');
-  
-  const img = document.getElementById('modalMainImg');
-  if (img) { img.style.transition = 'transform 0.2s ease'; img.style.transform = ''; }
+  if (!pointerActive || e.pointerId !== pointerId) return;
 
-  const horizontal = swipeLocked === 'h' || Math.abs(pointerDeltaX) > Math.abs(pointerDeltaY);
-  if (horizontal && Math.abs(pointerDeltaX) >= 40) {
-    if (pointerDeltaX < 0) showModalImageByIndex(modalImageIndex + 1);
-    else showModalImageByIndex(modalImageIndex - 1);
+  const dx = pointerDeltaX;
+  const dy = pointerDeltaY;
+  const elapsed = Math.max(1, performance.now() - pointerStartAt);
+  const releasedType = pointerType;
+  const horizontal = swipeLocked === 'h' || (Math.abs(dx) > Math.abs(dy) * 1.08);
+  const fastSwipe = Math.abs(dx) >= 16 && Math.abs(dx) / elapsed >= 0.25;
+  const distanceSwipe = Math.abs(dx) >= 28;
+  const mouseClick = releasedType === 'mouse' && Math.hypot(dx, dy) <= 8 && elapsed < 800;
+
+  try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+  resetGalleryPointer(e.currentTarget);
+
+  if (horizontal && (distanceSwipe || fastSwipe)) {
+    e.preventDefault();
+    showModalImageByIndex(modalImageIndex + (dx < 0 ? 1 : -1));
+  } else if (mouseClick) {
+    // click 이벤트까지 기다리지 않고 pointerup에서 처리해 PC 반응을 즉시 보이게 한다.
+    e.preventDefault();
+    showModalImageByIndex(modalImageIndex + 1);
   }
-  setTimeout(() => { pointerDeltaX = 0; pointerDeltaY = 0; swipeLocked = null; }, 50);
-  try { if (e.pointerId != null) e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+}
+
+function onGalleryPointerCancel(e) {
+  if (!pointerActive || e.pointerId !== pointerId) return;
+  // 브라우저가 세로 스크롤을 가져간 pointercancel은 사진 이동으로 처리하지 않는다.
+  resetGalleryPointer(e.currentTarget);
+}
+
+function loadModalFullImage(url, priority = 'auto') {
+  if (!url) return Promise.reject(new Error('empty image url'));
+  if (modalFullImageLoads.has(url)) return modalFullImageLoads.get(url);
+
+  const job = new Promise((resolve, reject) => {
+    const loader = new Image();
+    loader.decoding = 'async';
+    if ('fetchPriority' in loader) loader.fetchPriority = priority;
+    loader.onload = async () => {
+      try { if (loader.decode) await loader.decode(); } catch (_) {}
+      resolve(url);
+    };
+    loader.onerror = () => reject(new Error('image load failed'));
+    loader.src = url;
+  }).catch((error) => {
+    modalFullImageLoads.delete(url); // 일시 오류라면 다음 선택 때 재시도
+    throw error;
+  });
+
+  modalFullImageLoads.set(url, job);
+  return job;
+}
+
+function preloadAdjacentModalImage(index) {
+  if (modalImages.length <= 1) return;
+  const next = modalImages[(index + 1) % modalImages.length];
+  const schedule = window.requestIdleCallback || ((fn) => setTimeout(fn, 250));
+  schedule(() => { if (isModalOpen && next?.url) loadModalFullImage(next.url, 'low').catch(() => {}); }, { timeout: 1200 });
+}
+
+async function upgradeModalMainImage(index) {
+  const imgData = modalImages[index];
+  const mainImg = document.getElementById('modalMainImg');
+  if (!imgData || !mainImg) return;
+
+  const token = ++modalImageLoadToken;
+  mainImg.dataset.fullSrc = imgData.url;
+  try {
+    await loadModalFullImage(imgData.url, 'high');
+    if (token !== modalImageLoadToken || modalImageIndex !== index || !isModalOpen) return;
+    const liveImg = document.getElementById('modalMainImg');
+    if (!liveImg || liveImg.dataset.fullSrc !== imgData.url) return;
+    liveImg.dataset.fallback = '';
+    liveImg.onerror = function () { handleImgError(liveImg); };
+    liveImg.src = imgData.url;
+    liveImg.classList.remove('is-preview');
+    preloadAdjacentModalImage(index);
+  } catch (_) {
+    // 160/400px 미리보기는 유지한다. 큰 이미지 오류 때문에 화면을 비우지 않는다.
+  }
+}
+
+function keepActiveThumbnailVisible(activeThumb) {
+  const strip = activeThumb?.closest('.modal-thumb-strip');
+  if (!strip) return;
+  const left = activeThumb.offsetLeft;
+  const right = left + activeThumb.offsetWidth;
+  if (left < strip.scrollLeft) strip.scrollLeft = Math.max(0, left - 8);
+  else if (right > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = right - strip.clientWidth + 8;
 }
 
 function showModalImageByIndex(index) {
@@ -695,17 +843,39 @@ function showModalImageByIndex(index) {
   const mainImg = document.getElementById('modalMainImg');
   const badge = document.getElementById('modalImgBadge');
 
-  if (mainImg) { mainImg.dataset.fallback = ''; mainImg.style.transition = 'none'; mainImg.style.transform = ''; mainImg.onerror = function () { handleImgError(mainImg); }; mainImg.src = imgData.url; }
+  // 선택 테두리보다 메인 이미지 요청이 늦게 보이던 문제를 없애기 위해, 이미
+  // 로드된 160px 썸네일을 메인 영역에 먼저 즉시 표시한다.
+  if (mainImg) {
+    modalImageLoadToken++;
+    mainImg.dataset.fallback = '';
+    mainImg.dataset.fullSrc = imgData.url;
+    mainImg.style.transition = 'none';
+    mainImg.style.transform = '';
+    mainImg.onerror = function () { handleImgError(mainImg); };
+    const thumbImg = document.querySelectorAll('.modal-thumb-btn')[modalImageIndex]?.querySelector('img');
+    const readyThumb = thumbImg?.complete && thumbImg.naturalWidth > 0 ? thumbImg.currentSrc || thumbImg.src : '';
+    mainImg.src = readyThumb || imgData.thumbUrl || imgData.previewUrl || imgData.url;
+    mainImg.classList.toggle('is-preview', mainImg.getAttribute('src') !== imgData.url);
+  }
   if (badge) badge.textContent = `${modalImageIndex + 1} / ${modalImages.length} (${imgData.listLabel || imgData.key})`;
 
-  // 몇 번째 사진을 넘겨 보는지 집계 (P1-1) — 여러 장 확보한 효과의 증거
-  if (modalImages.length > 1 && currentDetailIndex >= 0 && allAnimals[currentDetailIndex]) {
-    track('photo_swipe', getDesertionNo(allAnimals[currentDetailIndex]), { photo: modalImageIndex + 1 });
-  }
+  let activeThumb = null;
+  document.querySelectorAll('.modal-thumb-btn').forEach((btn, i) => {
+    const active = i === modalImageIndex;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    btn.tabIndex = active ? 0 : -1;
+    if (active) activeThumb = btn;
+  });
+  keepActiveThumbnailVisible(activeThumb);
+  upgradeModalMainImage(modalImageIndex);
 
-  document.querySelectorAll('.modal-thumb-btn').forEach((btn, i) => btn.classList.toggle('active', i === modalImageIndex));
-  const activeThumb = document.querySelector('.modal-thumb-btn.active');
-  if (activeThumb && activeThumb.scrollIntoView) activeThumb.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+  // 페인트를 막지 않도록 집계 전송은 다음 프레임 뒤로 미룬다.
+  if (modalImages.length > 1 && currentDetailIndex >= 0 && allAnimals[currentDetailIndex]) {
+    const animalId = getDesertionNo(allAnimals[currentDetailIndex]);
+    const photo = modalImageIndex + 1;
+    setTimeout(() => track('photo_swipe', animalId, { photo }), 0);
+  }
 }
 
 // ==============================================================
@@ -818,6 +988,7 @@ async function showDetail(index, opts = {}) {
   modalImages = mergeAllImagesSmart(baseImages, []);
   modalImageIndex = 0; pointerActive = false; swipeLocked = null; pointerDeltaX = 0;
   currentLogs = null;
+  isModalGalleryLoading = !!desertionNo && !extraImagesCache.has(desertionNo);
 
   const noticePeriod = (animal.noticeSdt && animal.noticeEdt) ? `${formatDate(animal.noticeSdt)} ~ ${formatDate(animal.noticeEdt)}` : '정보 없음';
 
@@ -843,21 +1014,82 @@ async function showDetail(index, opts = {}) {
   if (filters) track('filter_used', desertionNo, filters);
 
   if (desertionNo) {
-    const [extraUrls, logs] = await Promise.all([
-      fetchExtraImages(desertionNo),
-      fetchAnimalLogs(desertionNo)
-    ]);
+    // 사진과 로그를 독립 반영한다. 느린 크롤링이 로그 표시를 막거나, 완료 시점에
+    // 모달 전체를 재렌더해 사용자가 선택한 사진을 1번으로 되돌리지 않는다.
+    fetchExtraImages(desertionNo).then((extraUrls) => {
+      if (!isModalOpen || currentDetailIndex !== index) return;
 
-    if (!isModalOpen || currentDetailIndex !== index) return;
+      const hadImages = modalImages.length > 0;
+      const selectedRawUrl = modalImages[modalImageIndex]?.rawUrl;
+      modalImages = mergeAllImagesSmart(baseImages, extraUrls);
+      const preservedIndex = modalImages.findIndex((img) => img.rawUrl === selectedRawUrl);
+      modalImageIndex = preservedIndex >= 0 ? preservedIndex : Math.max(0, Math.min(modalImageIndex, modalImages.length - 1));
+      isModalGalleryLoading = false;
+      // API 기본 사진이 전혀 없고 크롤링 사진만 발견된 경우에만 전체 구조를 한 번 만든다.
+      if (!hadImages && modalImages.length) renderModalContent(animal, index, kindTitle, stateText, noticePeriod);
+      else refreshModalGalleryControls();
+    });
 
-    const merged = mergeAllImagesSmart(baseImages, extraUrls);
-
-    modalImages = merged;
-    modalImageIndex = 0;
-    currentLogs = logs;
-
-    renderModalContent(animal, index, kindTitle, stateText, noticePeriod);
+    fetchAnimalLogs(desertionNo).then((logs) => {
+      if (!isModalOpen || currentDetailIndex !== index) return;
+      currentLogs = logs;
+      const timeline = document.querySelector('.timeline-section');
+      if (timeline) timeline.outerHTML = timelineHtml(animal, currentLogs);
+    });
   }
+}
+
+function modalThumbStripHtml(images, safeIndex) {
+  if (images.length <= 1) return '';
+  return `
+    <div class="modal-thumb-strip" role="tablist" aria-label="사진 목록">
+      ${images.map((img, i) => `
+        <button type="button"
+          class="modal-thumb-btn ${i === safeIndex ? 'active' : ''} ${img.isExtra ? 'is-extra' : 'is-origin'}"
+          onclick="event.stopPropagation(); selectModalImage(${i})"
+          title="${img.listLabel || img.key}"
+          role="tab"
+          aria-selected="${i === safeIndex ? 'true' : 'false'}"
+          tabindex="${i === safeIndex ? '0' : '-1'}"
+          aria-label="${i + 1}번째 사진 보기">
+          <img src="${i === 0 && !img.isExtra ? (img.previewUrl || img.thumbUrl || img.url) : (img.thumbUrl || img.previewUrl || img.url)}" alt="" loading="${i < 8 ? 'eager' : 'lazy'}" decoding="async" fetchpriority="low" onerror="handleImgError(this)" draggable="false">
+          <span class="thumb-num">${i + 1}</span>
+          ${img.isExtra ? '<span class="thumb-extra-badge">C</span>' : '<span class="thumb-origin-badge">J</span>'}
+        </button>
+      `).join('')}
+    </div>`;
+}
+
+function modalGalleryLoadingHtml() {
+  return isModalGalleryLoading
+    ? '<div class="modal-gallery-loading" aria-live="polite"><span></span> 추가 사진 확인 중...</div>'
+    : '';
+}
+
+function modalNavigationHintsHtml() {
+  return `
+    <div class="modal-nav-hint modal-nav-hint-pc"><i class="fas fa-hand-pointer"></i> 클릭 시 다음 사진</div>
+    <div class="modal-nav-hint modal-nav-hint-mobile"><i class="fas fa-arrows-alt-h"></i> 밀어서 사진 넘기기</div>`;
+}
+
+function refreshModalGalleryControls() {
+  const wrapper = document.querySelector('.modal-gallery-wrapper');
+  const mainBox = wrapper?.querySelector('.modal-main-image-box');
+  if (!wrapper || !mainBox) return;
+
+  const multiple = modalImages.length > 1;
+  mainBox.classList.toggle('has-multiple', multiple);
+  mainBox.querySelectorAll('.modal-nav-hint').forEach((hint) => hint.remove());
+  if (multiple) mainBox.insertAdjacentHTML('beforeend', modalNavigationHintsHtml());
+
+  const badge = document.getElementById('modalImgBadge');
+  const current = modalImages[modalImageIndex];
+  if (badge && current) badge.textContent = `${modalImageIndex + 1} / ${modalImages.length} (${current.listLabel || current.key})`;
+
+  wrapper.querySelector('.modal-thumb-strip')?.remove();
+  wrapper.querySelector('.modal-gallery-loading')?.remove();
+  wrapper.insertAdjacentHTML('beforeend', modalThumbStripHtml(modalImages, modalImageIndex) + modalGalleryLoadingHtml());
+  setupModalImageNavigation();
 }
 
 function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
@@ -871,28 +1103,12 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
     galleryHtml = `
       <div class="modal-gallery-wrapper">
         <div class="modal-main-image-box${images.length > 1 ? ' has-multiple' : ''}">
-          <img id="modalMainImg" src="${cur.url}" alt="대표 사진" decoding="async" fetchpriority="high" onerror="handleImgError(this)" draggable="false">
+          <img id="modalMainImg" class="is-preview" src="${cur.previewUrl || cur.thumbUrl || cur.url}" data-full-src="${cur.url}" alt="대표 사진" decoding="async" fetchpriority="high" onerror="handleImgError(this)" draggable="false">
           <span id="modalImgBadge" class="modal-img-badge">${safeIndex + 1} / ${images.length} (${cur.listLabel || cur.key})</span>
-          ${images.length > 1 ? `
-            <div class="modal-nav-hint modal-nav-hint-pc"><i class="fas fa-hand-pointer"></i> 클릭 시 다음 사진</div>
-            <div class="modal-nav-hint modal-nav-hint-mobile"><i class="fas fa-arrows-alt-h"></i> 밀어서 사진 넘기기</div>
-          ` : ''}
+          ${images.length > 1 ? modalNavigationHintsHtml() : ''}
         </div>
-        ${images.length > 1 ? `
-          <div class="modal-thumb-strip" role="tablist" aria-label="사진 목록">
-            ${images.map((img, i) => `
-              <button type="button"
-                class="modal-thumb-btn ${i === safeIndex ? 'active' : ''} ${img.isExtra ? 'is-extra' : 'is-origin'}"
-                onclick="event.stopPropagation(); selectModalImage(${i})"
-                title="${img.listLabel || img.key}"
-                aria-label="${i + 1}번째 사진 보기">
-                <img src="${img.thumbUrl || img.url}" alt="" loading="lazy" decoding="async" onerror="handleImgError(this)" draggable="false">
-                <span class="thumb-num">${i + 1}</span>
-                ${img.isExtra ? '<span class="thumb-extra-badge">C</span>' : '<span class="thumb-origin-badge">J</span>'}
-              </button>
-            `).join('')}
-          </div>
-        ` : ''}
+        ${modalThumbStripHtml(images, safeIndex)}
+        ${modalGalleryLoadingHtml()}
       </div>
     `;
   } else {
@@ -1006,7 +1222,10 @@ function closeModal(options = {}) {
   currentDetailIndex = -1;
   modalImages = [];
   modalImageIndex = 0;
+  modalImageLoadToken++;
   pointerActive = false;
+  pointerId = null;
+  isModalGalleryLoading = false;
   currentLogs = null;
   if (!options.skipHashClear) {
     // /a/:id 로 들어와 자동으로 열렸던 경우: 닫으면 목록 주소로 돌아간다

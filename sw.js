@@ -4,15 +4,15 @@
  *  - 동물 목록·상세·이미지 같은 실시간성 응답(/api, /a, /p)은 절대 캐시하지 않는다.
  *  - 정적 자산(css/js/아이콘 등)만 stale-while-revalidate로 다뤄 최신본을 놓치지 않는다.
  */
-const VERSION = 'v1.4.2';
+const VERSION = 'v1.4.3';
 const STATIC_CACHE = `shelter-static-${VERSION}`;
 
 // 설치 시 미리 받아둘 최소 셸(오프라인/재방문 즉시 표시용)
 const PRECACHE = [
   '/',
   '/index.html',
-  '/css/style.css?v=1.4.2',
-  '/js/app.js?v=1.4.2',
+  '/css/style.css?v=1.4.3',
+  '/js/app.js?v=1.4.3',
   '/logo.svg',
   '/favicon.png',
   '/manifest.webmanifest'
