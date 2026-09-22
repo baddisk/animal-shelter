@@ -93,6 +93,9 @@ function flushDwell() {
   const now = Date.now();
   const sec = Math.round((now - dwellSentAt) / 1000);
   if (sec < 1) return;
+  if (currentDetailIndex >= 0 && allAnimals[currentDetailIndex]) {
+    track('detail_close', getDesertionNo(allAnimals[currentDetailIndex]), { seconds: sec });
+  }
   dwellSentAt = now;
   const id = currentDetailIndex >= 0 && allAnimals[currentDetailIndex]
     ? getDesertionNo(allAnimals[currentDetailIndex]) : null;
@@ -212,6 +215,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const tel = e.target && e.target.closest ? e.target.closest('a[href^="tel:"]') : null;
     if (tel && currentDetailIndex >= 0 && allAnimals[currentDetailIndex]) {
       track('adopt_inquiry', getDesertionNo(allAnimals[currentDetailIndex]));
+      track('reserve_click', getDesertionNo(allAnimals[currentDetailIndex]));
     }
   });
 
@@ -1010,7 +1014,9 @@ async function showDetail(index, opts = {}) {
   // 📊 집계 (P1-1): 개체 열람 + 유입 경로 + 필터로 찾아낸 개체
   const source = opts.source || 'list';
   track('page_view', desertionNo);
+  // P1-1: 링크/목록 유입과 상세 열람을 분리해 전환율을 계산한다.
   track('link_open', desertionNo, { path: source === 'list' ? 'list' : 'link' });
+  track('detail_open', desertionNo, { path: source === 'list' ? 'list' : 'link' });
   const filters = activeFilterSummary();
   if (filters) track('filter_used', desertionNo, filters);
 
