@@ -467,3 +467,101 @@ body {
 }
 .admin-list-header b { color: var(--text); font-size: 0.95rem; }
 .admin-list-header .icon-btn { width: 26px; height: 26px; font-size: 0.7rem; }
+
+/* ==============================================================
+   📈 관리자 이용 통계 탭 (/admin.html)
+   ============================================================== */
+.admin-tabs { display: flex; gap: 6px; margin-bottom: 16px; border-bottom: 2px solid var(--border); }
+.admin-tab {
+  background: none; border: none; border-bottom: 3px solid transparent; margin-bottom: -2px;
+  padding: 10px 16px; font-size: 0.9rem; font-weight: 700; color: var(--text-light);
+  cursor: pointer; font-family: inherit;
+}
+.admin-tab:hover { color: var(--text); }
+.admin-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+.stats-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.stats-range { display: flex; gap: 6px; flex-wrap: wrap; }
+.range-pill {
+  border: 1.5px solid var(--border); background: #fff; color: var(--text-light);
+  border-radius: 20px; padding: 6px 14px; font-size: 0.82rem; font-weight: 700;
+  cursor: pointer; font-family: inherit;
+}
+.range-pill.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+
+/* KPI 카드 */
+.stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.stat-card { background: #fff; border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; }
+.stat-card .stat-ico { font-size: 1.1rem; }
+.stat-card .stat-label { font-size: 0.75rem; font-weight: 700; color: var(--text-light); margin-top: 4px; }
+.stat-card .stat-value { font-size: 1.5rem; font-weight: 800; color: var(--text); line-height: 1.2; margin-top: 2px; }
+.stat-card .stat-sub { font-size: 0.72rem; color: #94A3B8; margin-top: 3px; }
+
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; align-items: start; }
+.stats-box { background: #fff; border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; }
+.stats-box h3 { font-size: 0.92rem; color: var(--primary); margin-bottom: 12px; }
+
+/* 일별 막대그래프 */
+.bar-chart { display: flex; align-items: flex-end; gap: 4px; height: 170px; padding-top: 6px; }
+.bar-col { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; height: 100%; }
+.bar-col .bars { flex: 1; width: 100%; display: flex; align-items: flex-end; justify-content: center; gap: 2px; }
+.bar-col .bars i { width: 30%; max-width: 10px; min-height: 2px; border-radius: 3px 3px 0 0; display: block; transition: height 0.3s; }
+.bar-col .bars i.a { background: #FF6B35; }
+.bar-col .bars i.b { background: #EC4899; }
+.bar-col .bars i.c { background: #38BDF8; }
+.bar-col:hover .bars i { filter: brightness(1.15); }
+.bar-col .xlabel { font-size: 0.62rem; color: #94A3B8; margin-top: 5px; height: 12px; white-space: nowrap; }
+
+.chart-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 0.74rem; color: var(--text-light); }
+.chart-legend .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+.chart-legend .dot.a { background: #FF6B35; }
+.chart-legend .dot.b { background: #EC4899; }
+.chart-legend .dot.c { background: #38BDF8; }
+.chart-legend .dot.d { background: #CBD5E1; }
+
+/* 퍼널 / 필터 가로 막대 */
+.funnel { display: flex; flex-direction: column; gap: 8px; }
+.funnel-row { display: grid; grid-template-columns: 82px 1fr auto; gap: 10px; align-items: center; font-size: 0.78rem; }
+.funnel-row .fl { color: var(--text-light); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.funnel-row .fbar { background: #F1F5F9; border-radius: 6px; height: 16px; overflow: hidden; }
+.funnel-row .fbar i { display: block; height: 100%; background: linear-gradient(90deg, #FF8C5A, #FF6B35); border-radius: 6px; min-width: 2px; transition: width 0.3s; }
+.funnel-row .fv { font-size: 0.76rem; color: var(--text-light); white-space: nowrap; }
+.funnel-row .fv b { color: var(--primary); }
+
+/* 유입 경로 스택 바 */
+.source-bar { display: flex; height: 18px; border-radius: 9px; overflow: hidden; background: #F1F5F9; }
+.source-bar i { display: block; height: 100%; }
+.source-bar .s-link { background: #FF6B35; }
+.source-bar .s-list { background: #CBD5E1; }
+
+/* 통계 표 */
+.stats-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.stats-table th { text-align: right; font-size: 0.7rem; color: #94A3B8; padding: 6px 4px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.stats-table th:first-child { text-align: left; }
+.stats-table td { padding: 7px 4px; border-bottom: 1px solid #F1F5F9; text-align: right; white-space: nowrap; }
+.stats-table tbody tr { cursor: pointer; }
+.stats-table tbody tr:hover { background: #FFF7ED; }
+.stats-table .a-cell { display: flex; align-items: center; gap: 8px; text-align: left; min-width: 0; }
+.stats-table .a-cell img { width: 34px; height: 34px; border-radius: 7px; object-fit: cover; background: #E2E8F0; flex-shrink: 0; }
+.stats-table .no-thumb { width: 34px; height: 34px; border-radius: 7px; background: #F1F5F9; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.stats-table .a-meta { display: flex; flex-direction: column; min-width: 0; }
+.stats-table .a-meta b { font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stats-table .a-meta em { font-size: 0.68rem; color: #94A3B8; font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stats-table .rate { font-style: normal; font-size: 0.66rem; color: #EC4899; margin-left: 3px; }
+
+/* 노출 적은 개체 */
+.cold-list { display: flex; flex-direction: column; gap: 6px; }
+.cold-item { display: flex; align-items: center; gap: 8px; padding: 6px; border-radius: 8px; cursor: pointer; }
+.cold-item:hover { background: #FFF7ED; }
+.cold-item img, .cold-item .no-thumb { width: 32px; height: 32px; border-radius: 7px; object-fit: cover; background: #E2E8F0; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
+.cold-item .c-meta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.cold-item .c-meta b { font-size: 0.76rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cold-item .c-meta em { font-size: 0.68rem; color: #94A3B8; font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cold-count { font-size: 0.72rem; font-weight: 800; color: var(--text-light); background: #F1F5F9; padding: 3px 8px; border-radius: 10px; flex-shrink: 0; }
+.cold-count.zero { background: #FEE2E2; color: #DC2626; }
+
+@media (max-width: 860px) {
+  .stats-grid { grid-template-columns: 1fr; }
+  .stat-cards { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+  .bar-chart { height: 140px; }
+}
