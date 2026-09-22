@@ -334,6 +334,274 @@ async function refreshRecord() {
   renderPanel();
 }
 
+// ==============================================================
+// 📈 이용 통계 탭 — /api/admin/stats 집계를 표·그래프로 보여준다
+//    외부 차트 라이브러리 없이 CSS/SVG 로만 그린다(오프라인·내부망 대비).
+// ==============================================================
+let statsDays = 7;
+let statsData = null;
+let statsLoaded = false;
+
+function switchTab(name) {
+  const care = name === 'care';
+  document.getElementById('tabCare').style.display = care ? 'grid' : 'none';
+  document.getElementById('tabStats').style.display = care ? 'none' : 'block';
+  document.getElementById('tabBtnCare').classList.toggle('active', care);
+  document.getElementById('tabBtnStats').classList.toggle('active', !care);
+  document.getElementById('adminTitle').textContent =
+    care ? '🐕 개체 상태 · 케어 기록 관리' : '📈 이용 통계';
+  try { sessionStorage.setItem('shelter_admin_tab', name); } catch (_) {}
+  if (!care && !statsLoaded) loadStats();
+}
+
+function setStatsDays(days) {
+  statsDays = days;
+  document.querySelectorAll('#statsRange .range-pill').forEach((b) =>
+    b.classList.toggle('active', Number(b.dataset.days) === days)
+  );
+  loadStats();
+}
+
+async function loadStats(force = false) {
+  const body = document.getElementById('statsBody');
+  body.innerHTML = '<div class="admin-list-empty"><i class="fas fa-circle-notch fa-spin"></i> 통계를 불러오는 중...</div>';
+  try {
+    const qs = new URLSearchParams({ days: String(statsDays) });
+    if (force) qs.set('refresh', '1');
+    statsData = await api(`/api/admin/stats?${qs}`);
+    statsLoaded = true;
+    renderStats(statsData);
+  } catch (e) {
+    body.innerHTML = `<div class="admin-list-empty">통계를 불러오지 못했습니다.<br><b>${escapeHtml(e.message)}</b></div>`;
+  }
+}
+
+function downloadStatsCsv() {
+  // 인증 헤더가 필요하므로 fetch 로 받아 Blob 으로 저장한다
+  fetch(`/api/admin/stats/export.csv?days=${statsDays}`, { headers: { Authorization: 'Bearer ' + token } })
+    .then((r) => { if (!r.ok) throw new Error('다운로드 실패'); return r.blob(); })
+    .then((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `carelink-stats-${statsDays}d.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      toast('CSV를 내려받았습니다.');
+    })
+    .catch((e) => toast('실패: ' + e.message));
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function fmtNum(n) {
+  return Number(n || 0).toLocaleString('ko-KR');
+}
+
+function fmtDuration(sec) {
+  const s = Math.round(Number(sec) || 0);
+  if (s < 60) return `${s}초`;
+  const m = Math.floor(s / 60);
+  return `${m}분 ${String(s % 60).padStart(2, '0')}초`;
+}
+
+function statThumb(t) {
+  if (!t) return '';
+  return t.startsWith('/') ? t : `/api/image-proxy?url=${encodeURIComponent(t)}&w=160`;
+}
+
+function renderStats(s) {
+  const t = s.totals;
+  document.getElementById('statsMeta').textContent =
+    `${s.range.from} ~ ${s.range.to} · ${s.storage === 'mongodb' ? 'DB' : '파일'} 집계`;
+
+  const cards = [
+    { icon: '👀', label: '상세 열람', value: fmtNum(t.detail_open), sub: `개체 ${fmtNum(t.animals_viewed)}마리 노출` },
+    { icon: '🔗', label: '링크 유입', value: fmtNum(s.source.link), sub: `목록 탐색 ${fmtNum(s.source.list)}건` },
+    { icon: '🤝', label: '입양 문의', value: fmtNum(t.adopt_inquiry), sub: `열람 대비 ${pctOf(t.adopt_inquiry, t.detail_open)}%` },
+    { icon: '📤', label: '공유 · 복사', value: fmtNum(t.share), sub: `사진 탐색 ${fmtNum(t.photo_swipe)}회` },
+    { icon: '⏱️', label: '평균 체류', value: fmtDuration(t.avg_dwell_sec), sub: `누적 ${fmtDuration(t.total_dwell_sec)}` },
+    { icon: '📄', label: '페이지 조회', value: fmtNum(t.page_view), sub: `전체 이벤트 ${fmtNum(t.events)}건` }
+  ];
+
+  document.getElementById('statsBody').innerHTML = `
+    <div class="stat-cards">
+      ${cards.map((c) => `
+        <div class="stat-card">
+          <div class="stat-ico">${c.icon}</div>
+          <div class="stat-label">${c.label}</div>
+          <div class="stat-value">${c.value}</div>
+          <div class="stat-sub">${c.sub}</div>
+        </div>`).join('')}
+    </div>
+
+    <div class="stats-grid">
+      <div class="stats-box">
+        <h3><i class="fas fa-chart-column"></i> 일별 추이</h3>
+        ${renderTrend(s.series)}
+        <div class="chart-legend">
+          <span><i class="dot a"></i> 상세 열람</span>
+          <span><i class="dot b"></i> 입양 문의</span>
+          <span><i class="dot c"></i> 공유·복사</span>
+        </div>
+      </div>
+
+      <div class="stats-box">
+        <h3><i class="fas fa-filter"></i> 전환 퍼널</h3>
+        ${renderFunnel(s.funnel)}
+        ${s.shareMetric ? `<p class="admin-hint">공유·복사 ${fmtNum(s.shareMetric.value)}건 — 열람 100건당 ${s.shareMetric.per100}건 (중복 발생 가능해 퍼널에서 제외)</p>` : ''}
+        <h3 style="margin-top:18px;"><i class="fas fa-route"></i> 유입 경로</h3>
+        ${renderSource(s.source)}
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stats-box">
+        <h3><i class="fas fa-fire"></i> 관심 많은 개체 TOP</h3>
+        ${renderTopAnimals(s.topAnimals)}
+      </div>
+      <div class="stats-box">
+        <h3><i class="fas fa-snowflake"></i> 노출이 적은 개체 (홍보 필요)</h3>
+        ${renderColdAnimals(s.coldAnimals)}
+        <h3 style="margin-top:18px;"><i class="fas fa-sliders"></i> 많이 쓰인 필터</h3>
+        ${renderFilters(s.topFilters)}
+      </div>
+    </div>
+
+    <p class="admin-hint">
+      ※ 개인정보는 수집하지 않습니다. 방문자 식별자 없이 집계 수치만 저장됩니다.
+      ${s.fromCache ? ' · 1분 캐시된 결과' : ''}
+    </p>
+  `;
+}
+
+function pctOf(n, d) {
+  return d > 0 ? Math.round((n / d) * 1000) / 10 : 0;
+}
+
+// --- 일별 막대그래프 (열람/문의/공유 3계열) ---
+function renderTrend(series) {
+  if (!series.length) return '<p class="admin-hint">데이터가 없습니다.</p>';
+  const max = Math.max(1, ...series.map((d) => Math.max(d.detail_open, d.adopt_inquiry, d.share)));
+  // 30일이 넘어가면 라벨이 겹치므로 5일 간격으로만 찍는다
+  const step = series.length > 14 ? Math.ceil(series.length / 8) : 1;
+  return `
+    <div class="bar-chart" style="--max:${max}">
+      ${series.map((d, i) => `
+        <div class="bar-col" title="${d.date} · 열람 ${d.detail_open} / 문의 ${d.adopt_inquiry} / 공유 ${d.share}">
+          <div class="bars">
+            <i class="a" style="height:${(d.detail_open / max) * 100}%"></i>
+            <i class="b" style="height:${(d.adopt_inquiry / max) * 100}%"></i>
+            <i class="c" style="height:${(d.share / max) * 100}%"></i>
+          </div>
+          <span class="xlabel">${i % step === 0 ? d.date.slice(5).replace('-', '/') : ''}</span>
+        </div>`).join('')}
+    </div>`;
+}
+
+// --- 퍼널: 상세열람 100% 기준 가로 막대 ---
+function renderFunnel(funnel) {
+  if (!funnel.length) return '<p class="admin-hint">데이터가 없습니다.</p>';
+  return `<div class="funnel">
+    ${funnel.map((f) => `
+      <div class="funnel-row">
+        <span class="fl">${f.label}</span>
+        <span class="fbar"><i style="width:${Math.min(100, f.rate)}%"></i></span>
+        <span class="fv">${fmtNum(f.value)} <b>${f.rate}%</b></span>
+      </div>`).join('')}
+  </div>`;
+}
+
+function renderSource(src) {
+  const total = (src.link || 0) + (src.list || 0);
+  if (!total) return '<p class="admin-hint">데이터가 없습니다.</p>';
+  const linkPct = pctOf(src.link, total);
+  return `
+    <div class="source-bar">
+      <i class="s-link" style="width:${linkPct}%"></i>
+      <i class="s-list" style="width:${100 - linkPct}%"></i>
+    </div>
+    <div class="chart-legend">
+      <span><i class="dot a"></i> 공유 링크 ${fmtNum(src.link)}건 (${linkPct}%)</span>
+      <span><i class="dot d"></i> 목록 탐색 ${fmtNum(src.list)}건</span>
+    </div>`;
+}
+
+function renderTopAnimals(rows) {
+  if (!rows.length) return '<p class="admin-hint">아직 열람 기록이 없습니다.</p>';
+  return `<table class="stats-table">
+    <thead><tr><th>개체</th><th>열람</th><th>문의</th><th>공유</th><th>평균체류</th></tr></thead>
+    <tbody>
+      ${rows.map((r) => `
+        <tr onclick="gotoAnimal('${escapeHtml(r.id)}')" title="클릭하면 케어 기록 화면으로 이동">
+          <td class="a-cell">
+            ${r.thumb ? `<img src="${statThumb(r.thumb)}" alt="" onerror="this.style.visibility='hidden'">` : '<span class="no-thumb">🐾</span>'}
+            <span class="a-meta">
+              <b>${escapeHtml(r.noticeNo || r.id)}</b>
+              <em>${escapeHtml(r.kind || '')}${r.customStatus ? ' · ' + STATUS_LABEL[r.customStatus] : ''}</em>
+            </span>
+          </td>
+          <td><b>${fmtNum(r.detail_open)}</b></td>
+          <td>${fmtNum(r.adopt_inquiry)}${r.inquiry_rate ? `<em class="rate">${r.inquiry_rate}%</em>` : ''}</td>
+          <td>${fmtNum(r.share)}</td>
+          <td>${r.avg_dwell_sec ? fmtDuration(r.avg_dwell_sec) : '-'}</td>
+        </tr>`).join('')}
+    </tbody>
+  </table>`;
+}
+
+function renderColdAnimals(rows) {
+  if (!rows.length) return '<p class="admin-hint">보호중 개체 정보를 불러오지 못했습니다.</p>';
+  return `<div class="cold-list">
+    ${rows.map((r) => `
+      <div class="cold-item" onclick="gotoAnimal('${escapeHtml(r.id)}')">
+        ${r.thumb ? `<img src="${statThumb(r.thumb)}" alt="" onerror="this.style.visibility='hidden'">` : '<span class="no-thumb">🐾</span>'}
+        <span class="c-meta">
+          <b>${escapeHtml(r.noticeNo || r.id)}</b>
+          <em>${escapeHtml(r.kind || '')}</em>
+        </span>
+        <span class="cold-count ${r.detail_open === 0 ? 'zero' : ''}">${fmtNum(r.detail_open)}회</span>
+      </div>`).join('')}
+  </div>`;
+}
+
+function renderFilters(rows) {
+  if (!rows.length) return '<p class="admin-hint">필터 사용 기록이 없습니다.</p>';
+  const max = Math.max(...rows.map((r) => r.count));
+  return `<div class="funnel">
+    ${rows.map((r) => `
+      <div class="funnel-row">
+        <span class="fl">${escapeHtml(r.label)}</span>
+        <span class="fbar"><i style="width:${(r.count / max) * 100}%"></i></span>
+        <span class="fv">${fmtNum(r.count)}</span>
+      </div>`).join('')}
+  </div>`;
+}
+
+// 통계 표에서 개체를 클릭하면 케어 기록 탭으로 이동해 바로 선택한다
+function gotoAnimal(key) {
+  switchTab('care');
+  const a = animals.find((x) => getKey(x) === key);
+  if (a) {
+    selectAnimal(a);
+    const esc = window.CSS?.escape ? CSS.escape(key) : key.replace(/["\\]/g, '\\$&');
+    const el = document.querySelector(`.admin-animal-item[data-key="${esc}"]`);
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  } else {
+    toast('보호중 목록에 없는 개체입니다(공고 종료 등).');
+  }
+}
+
 // ---------- 시작 ----------
-if (token) showAdmin();
-else showLogin();
+if (token) {
+  showAdmin();
+  // 새로고침해도 보던 탭을 유지한다
+  try {
+    if (sessionStorage.getItem('shelter_admin_tab') === 'stats') switchTab('stats');
+  } catch (_) {}
+} else showLogin();

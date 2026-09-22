@@ -242,6 +242,253 @@ app.post('/api/track', (req, res) => {
 });
 
 // ==============================================================
+// 📈 통계 집계 API (관리자 전용)
+//    /api/track 으로 쌓인 이벤트를 관리자 화면이 바로 그릴 수 있는
+//    형태(요약 KPI · 일별 추이 · 퍼널 · 개체 TOP)로 계산해 내려준다.
+//    - 저장소: MONGODB_URI 있으면 events 컬렉션, 없으면 data/events.json
+//    - 개인정보는 애초에 수집하지 않으므로 집계값만 오간다.
+// ==============================================================
+const STATS_MAX_DAYS = 365;
+const STATS_CACHE_TTL = 60 * 1000; // 같은 조건 1분 캐시 (관리자 새로고침 연타 보호)
+const statsCache = new Map();
+
+// KST(UTC+9) 기준 날짜 문자열 — 보호소는 한국 시간으로 하루를 센다
+function kstDateStr(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  return new Date(d.getTime() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+}
+// KST 기준 N일 전 00:00 의 UTC ISO 시각
+function kstDayStartISO(daysAgo) {
+  const nowKst = new Date(Date.now() + 9 * 3600 * 1000);
+  nowKst.setUTCHours(0, 0, 0, 0);
+  return new Date(nowKst.getTime() - daysAgo * 86400000 - 9 * 3600 * 1000).toISOString();
+}
+
+// 기간 내 이벤트 읽기 (저장소 무관 동일 인터페이스)
+async function readEvents(fromISO) {
+  if (mongoEventsColl) {
+    return await mongoEventsColl
+      .find({ ts: { $gte: fromISO } })
+      .project({ _id: 0, ts: 1, event: 1, id: 1, meta: 1 })
+      .limit(200000)
+      .toArray();
+  }
+  return eventsLocal.filter((e) => String(e.ts) >= fromISO);
+}
+
+function emptyDay(date) {
+  return {
+    date,
+    page_view: 0, detail_open: 0, link_open: 0, link_from_link: 0, link_from_list: 0,
+    adopt_inquiry: 0, reserve_click: 0, share: 0, photo_swipe: 0, dwell_sec: 0
+  };
+}
+
+function pct(n, d) {
+  return d > 0 ? Math.round((n / d) * 1000) / 10 : 0;
+}
+
+async function buildStats(days) {
+  const fromISO = kstDayStartISO(days - 1);
+  const events = await readEvents(fromISO);
+
+  // --- 날짜 뼈대 먼저 만들기 (이벤트가 0인 날도 그래프에 빈칸으로 보여야 한다) ---
+  const daily = new Map();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = kstDateStr(Date.now() - i * 86400000);
+    daily.set(d, emptyDay(d));
+  }
+
+  const byEvent = {};
+  const perAnimal = new Map();
+  const filterUse = new Map();
+  let dwellSum = 0, dwellCount = 0;
+
+  const animalOf = (id) => {
+    const key = String(id || '(미상)');
+    if (!perAnimal.has(key)) {
+      perAnimal.set(key, { id: key, detail_open: 0, adopt_inquiry: 0, share: 0, photo_swipe: 0, dwell_sec: 0, dwell_n: 0 });
+    }
+    return perAnimal.get(key);
+  };
+
+  for (const e of events) {
+    const ev = String(e.event || '');
+    const date = kstDateStr(e.ts);
+    const day = daily.get(date);
+    byEvent[ev] = (byEvent[ev] || 0) + 1;
+    const meta = e.meta || {};
+
+    if (day) {
+      if (ev === 'page_view') day.page_view++;
+      else if (ev === 'detail_open') day.detail_open++;
+      else if (ev === 'link_open') {
+        day.link_open++;
+        if (meta.path === 'link') day.link_from_link++; else day.link_from_list++;
+      } else if (ev === 'adopt_inquiry') day.adopt_inquiry++;
+      else if (ev === 'reserve_click') day.reserve_click++;
+      else if (ev === 'link_share' || ev === 'link_copy') day.share++;
+      else if (ev === 'photo_swipe') day.photo_swipe++;
+    }
+
+    if (ev === 'dwell_time' || ev === 'detail_close') {
+      const sec = Number(meta.seconds);
+      if (ev === 'dwell_time' && Number.isFinite(sec) && sec > 0 && sec < 3600) {
+        dwellSum += sec; dwellCount++;
+        if (day) day.dwell_sec += sec;
+      }
+      if (ev === 'detail_close' && Number.isFinite(sec) && sec > 0 && sec < 3600 && e.id) {
+        const a = animalOf(e.id);
+        a.dwell_sec += sec; a.dwell_n++;
+      }
+    }
+
+    if (e.id && ['detail_open', 'adopt_inquiry', 'photo_swipe', 'link_share', 'link_copy'].includes(ev)) {
+      const a = animalOf(e.id);
+      if (ev === 'detail_open') a.detail_open++;
+      else if (ev === 'adopt_inquiry') a.adopt_inquiry++;
+      else if (ev === 'photo_swipe') a.photo_swipe++;
+      else a.share++;
+    }
+
+    if (ev === 'filter_used') {
+      for (const [k, v] of Object.entries(meta)) {
+        if (k === 'bgnde' || k === 'endde') continue; // 날짜는 종류가 너무 많아 순위가 무의미
+        const label = `${k}=${v}`;
+        filterUse.set(label, (filterUse.get(label) || 0) + 1);
+      }
+    }
+  }
+
+  const series = [...daily.values()];
+  const totals = {
+    page_view: byEvent.page_view || 0,
+    detail_open: byEvent.detail_open || 0,
+    link_open: byEvent.link_open || 0,
+    photo_swipe: byEvent.photo_swipe || 0,
+    adopt_inquiry: byEvent.adopt_inquiry || 0,
+    reserve_click: byEvent.reserve_click || 0,
+    share: (byEvent.link_share || 0) + (byEvent.link_copy || 0),
+    filter_used: byEvent.filter_used || 0,
+    events: events.length,
+    animals_viewed: perAnimal.size,
+    avg_dwell_sec: dwellCount ? Math.round((dwellSum / dwellCount) * 10) / 10 : 0,
+    total_dwell_sec: Math.round(dwellSum)
+  };
+
+  // --- 유입 경로(링크 공유 vs 목록 탐색) ---
+  const fromLink = series.reduce((s, d) => s + d.link_from_link, 0);
+  const fromList = series.reduce((s, d) => s + d.link_from_list, 0);
+
+  // --- 전환 퍼널: 상세 열람 → 사진 탐색 → 입양 문의 ---
+  //   공유·복사는 한 열람에서 여러 번 일어날 수 있어(100% 초과) 단계가 아닌
+  //   보조 지표로 따로 내려준다.
+  const funnel = [
+    { key: 'detail_open', label: '상세 열람', value: totals.detail_open },
+    { key: 'photo_swipe', label: '사진 탐색', value: totals.photo_swipe },
+    { key: 'adopt_inquiry', label: '입양 문의', value: totals.adopt_inquiry }
+  ].map((s) => ({ ...s, rate: pct(s.value, totals.detail_open) }));
+  const shareMetric = { label: '공유·복사', value: totals.share, per100: pct(totals.share, totals.detail_open) };
+
+  // --- 개체 TOP: 이름·품종을 붙여 관리자가 바로 알아보게 한다 ---
+  let lookup = new Map();
+  try {
+    const items = await getAllAnimals();
+    for (const it of items) {
+      const k = String(it.desertionNo || it.desertionNO || it.noticeNo || '').trim();
+      if (k) lookup.set(k, it);
+    }
+  } catch (_) { /* 외부 API 실패해도 통계는 나와야 한다 */ }
+
+  const topAnimals = [...perAnimal.values()]
+    .sort((a, b) => b.detail_open - a.detail_open || b.adopt_inquiry - a.adopt_inquiry)
+    .slice(0, 20)
+    .map((a) => {
+      const it = lookup.get(a.id);
+      return {
+        id: a.id,
+        noticeNo: it?.noticeNo || null,
+        kind: it ? kindTextOf(it) : null,
+        thumb: it?.popfile1 || it?.popfile2 || null,
+        customStatus: db.animals[a.id]?.status || null,
+        detail_open: a.detail_open,
+        adopt_inquiry: a.adopt_inquiry,
+        share: a.share,
+        photo_swipe: a.photo_swipe,
+        avg_dwell_sec: a.dwell_n ? Math.round((a.dwell_sec / a.dwell_n) * 10) / 10 : 0,
+        inquiry_rate: pct(a.adopt_inquiry, a.detail_open)
+      };
+    });
+
+  // --- 관심을 못 받는 개체(노출 0~소수) — 홍보가 필요한 아이를 찾아준다 ---
+  const coldAnimals = [...lookup.entries()]
+    .map(([k, it]) => ({
+      id: k,
+      noticeNo: it.noticeNo || null,
+      kind: kindTextOf(it),
+      thumb: it.popfile1 || it.popfile2 || null,
+      detail_open: perAnimal.get(k)?.detail_open || 0
+    }))
+    .sort((a, b) => a.detail_open - b.detail_open)
+    .slice(0, 10);
+
+  const topFilters = [...filterUse.entries()]
+    .sort((a, b) => b[1] - a[1]).slice(0, 10)
+    .map(([label, count]) => ({ label, count }));
+
+  return {
+    range: { days, from: kstDateStr(fromISO), to: kstDateStr(Date.now()) },
+    storage: mongoEventsColl ? 'mongodb' : 'file',
+    generatedAt: new Date().toISOString(),
+    totals,
+    byEvent,
+    series,
+    funnel,
+    shareMetric,
+    source: { link: fromLink, list: fromList },
+    topAnimals,
+    coldAnimals,
+    topFilters
+  };
+}
+
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), STATS_MAX_DAYS);
+    const cacheKey = `d${days}`;
+    const hit = statsCache.get(cacheKey);
+    if (!(req.query.refresh === '1') && hit && Date.now() - hit.ts < STATS_CACHE_TTL) {
+      return res.json({ ...hit.data, fromCache: true });
+    }
+    const data = await buildStats(days);
+    statsCache.set(cacheKey, { ts: Date.now(), data });
+    res.json({ ...data, fromCache: false });
+  } catch (e) {
+    console.error('📈 통계 집계 실패:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 일별 집계 CSV 내려받기 — 엑셀로 열어 보고서에 붙일 수 있게 (BOM 포함)
+app.get('/api/admin/stats/export.csv', requireAdmin, async (req, res) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), STATS_MAX_DAYS);
+    const s = await buildStats(days);
+    const head = '날짜,방문,상세열람,링크유입,목록유입,사진탐색,공유·복사,입양문의,예약클릭,체류시간(초)';
+    const rows = s.series.map((d) => [
+      d.date, d.page_view, d.detail_open, d.link_from_link, d.link_from_list,
+      d.photo_swipe, d.share, d.adopt_inquiry, d.reserve_click, Math.round(d.dwell_sec)
+    ].join(','));
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="carelink-stats-${s.range.from}_${s.range.to}.csv"`);
+    res.send('\uFEFF' + [head, ...rows].join('\n') + '\n');
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==============================================================
 // 🔗 개체별 공유 페이지 /a/:id (P0-2 링크 미리보기)
 //    카카오톡·문자 미리보기 로봇은 샵(#) 뒤를 읽지 못하므로 경로형 주소를
 //    새로 연다. 기존 #detail/ 링크도 그대로 동작한다(호환 유지).
