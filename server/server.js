@@ -193,8 +193,8 @@ app.post('/api/admin/logout', (req, res) => {
 // ==============================================================
 const EVENTS_PATH = path.join(DATA_DIR, 'events.json');
 const TRACK_EVENTS = new Set([
-  'page_view', 'link_open', 'photo_swipe', 'dwell_time',
-  'filter_used', 'adopt_inquiry', 'link_share', 'link_copy'
+  'page_view', 'link_open', 'detail_open', 'detail_close', 'photo_swipe', 'dwell_time',
+  'filter_used', 'adopt_inquiry', 'reserve_click', 'similar_click', 'link_share', 'link_copy'
 ]);
 let eventsLocal = [];
 try { eventsLocal = JSON.parse(fs.readFileSync(EVENTS_PATH, 'utf8') || '[]'); } catch (_) { /* 최초 실행 */ }
