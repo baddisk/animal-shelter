@@ -2,12 +2,30 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const fs = require('fs');
 const path = require('path');
+const pkg = require('../package.json');
 const https = require('https');
 const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// 이 저장소의 HTML·css/·js/는 public/이 아니라 프로젝트 루트에 있다.
+const PUBLIC_DIR = path.join(__dirname, '..');
+const COMMIT = (process.env.RENDER_GIT_COMMIT || '').slice(0, 7);
+const ASSET_V = `${pkg.version}-${COMMIT || Date.now().toString(36)}`;
+
+// 아래의 고정 파일명만 받는다. 요청 경로를 파일명으로 넘기지 않는다.
+function readVersionedTemplate(file) {
+  return fs.readFileSync(path.join(PUBLIC_DIR, file), 'utf8').replace(/__V__/g, ASSET_V);
+}
+const htmlCache = new Map();
+function renderHtml(file) {
+  if (!htmlCache.has(file)) htmlCache.set(file, readVersionedTemplate(file));
+  return htmlCache.get(file);
+}
+const workerScript = readVersionedTemplate('sw.js');
 
 // Render 등 리버스 프록시 뒤에서 req.protocol 등을 올바르게 잡기 위한 설정
 app.set('trust proxy', 1);
@@ -24,7 +42,20 @@ app.use((req, res, next) => {
   }
   next();
 });
-app.use(express.static(path.join(__dirname, '..')));
+// 원본 HTML 템플릿이 정적 파일로 먼저 나가지 않게 한다.
+app.get(['/', '/index.html'], (req, res) => {
+  res.set('Cache-Control', 'no-cache').type('html').send(renderHtml('index.html'));
+});
+app.get('/admin.html', (req, res) => {
+  res.set('Cache-Control', 'no-store').type('html').send(renderHtml('admin.html'));
+});
+app.get('/api/version', (req, res) => {
+  res.set('Cache-Control', 'no-store').json({ version: ASSET_V });
+});
+// 등록 URL은 고정하고, 워커의 내용과 캐시 이름은 배포마다 함께 갱신한다.
+app.get('/sw.js', (req, res) => {
+  res.set('Cache-Control', 'no-cache').type('application/javascript').send(workerScript);
+});
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
 const httpAgent = new http.Agent({ keepAlive: true });
@@ -42,7 +73,6 @@ let cachedGanghwaParams = null;
 //    보호소가 직접 입력한 데이터를 API 결과 위에 덧씌운다(overlay).
 //    개체 매칭 키 = desertionNo (없으면 noticeNo)
 // ==============================================================
-const fs = require('fs');
 const crypto = require('crypto');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -493,20 +523,6 @@ app.get('/api/admin/stats/export.csv', requireAdmin, async (req, res) => {
 //    카카오톡·문자 미리보기 로봇은 샵(#) 뒤를 읽지 못하므로 경로형 주소를
 //    새로 연다. 기존 #detail/ 링크도 그대로 동작한다(호환 유지).
 // ==============================================================
-const INDEX_PATH = path.join(__dirname, '..', 'index.html');
-let indexHtmlCache = { mtime: 0, html: null };
-function getIndexHtml() {
-  try {
-    const st = fs.statSync(INDEX_PATH);
-    if (indexHtmlCache.html && indexHtmlCache.mtime === st.mtimeMs) return indexHtmlCache.html;
-    const html = fs.readFileSync(INDEX_PATH, 'utf8');
-    indexHtmlCache = { mtime: st.mtimeMs, html };
-    return html;
-  } catch (_) {
-    return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"></head><body><h1>index.html 을 찾을 수 없습니다.</h1></body></html>';
-  }
-}
-
 // 메타 태그 속성값용 이스케이프 — 값에 따옴표가 있으면 태그가 깨진다
 function escapeHtmlAttr(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => (
@@ -619,7 +635,8 @@ function ogTagsFor(req, animal) {
   return tags.join('\n  ');
 }
 
-app.get(['/a/:id', '/p/:id'], async (req, res) => {
+app.get(['/a/:id', '/p/:id'], async (req, res, next) => {
+  res.set('Cache-Control', 'no-cache');
   const id = decodeURIComponent(String(req.params.id || '')).trim();
   let animal = null;
   try { animal = await findAnimalById(id); } catch (_) { /* 아래 404로 */ }
@@ -631,7 +648,9 @@ app.get(['/a/:id', '/p/:id'], async (req, res) => {
   }
 
   const shareId = shareIdOf(animal);
-  let html = getIndexHtml();
+  // 공통 템플릿만 캐시한다. OG와 모달 시작 ID는 요청마다 별도로 넣는다.
+  let html;
+  try { html = renderHtml('index.html'); } catch (err) { return next(err); }
   const tags = ogTagsFor(req, animal);
   // <!--OG--> 자리에 미리보기 메타 태그를, <!--BOOT--> 자리에 자동 열기 스크립트를 끼운다
   const boot = `<script>window.__CARELINK_BOOT__=${JSON.stringify(shareId).replace(/</g, '\\u003c')};</script>`;
@@ -1547,6 +1566,19 @@ app.post('/api/cache/clear', (req, res) => {
   detailImageCache.clear();
   res.json({ ok: true });
 });
+
+// HTML·공유 페이지·API·서비스워커 경로를 모두 처리한 뒤 정적 파일을 제공한다.
+app.use(express.static(PUBLIC_DIR, {
+  index: false,
+  setHeaders(res, filePath) {
+    if (/\.(?:js|css|svg|png|jpe?g|webp|woff2?|ico|webmanifest)$/i.test(filePath)) {
+      // 버전 없는 주소(예: JS에서 직접 쓰는 로고)나 지난 배포 주소는 재검증한다.
+      res.set('Cache-Control', res.req.query.v === ASSET_V
+        ? 'public, max-age=31536000, immutable'
+        : 'no-cache');
+    }
+  }
+}));
 
 app.listen(PORT, async () => {
   console.log(`🐾 강화군 동물보호센터 서버 포트 ${PORT} 실행중`);

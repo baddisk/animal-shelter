@@ -4,18 +4,18 @@
  *  - 동물 목록·상세·이미지 같은 실시간성 응답(/api, /a, /p)은 절대 캐시하지 않는다.
  *  - 정적 자산(css/js/아이콘 등)만 stale-while-revalidate로 다뤄 최신본을 놓치지 않는다.
  */
-const VERSION = 'v1.4.4';
+const VERSION = '__V__'; // /sw.js 응답 시 서버가 현재 배포 버전을 넣는다.
 const STATIC_CACHE = `shelter-static-${VERSION}`;
 
 // 설치 시 미리 받아둘 최소 셸(오프라인/재방문 즉시 표시용)
 const PRECACHE = [
   '/',
   '/index.html',
-  '/css/style.css?v=1.4.4',
-  '/js/app.js?v=1.4.4',
+  `/css/style.css?v=${VERSION}`,
+  `/js/app.js?v=${VERSION}`,
   '/logo.svg',
-  '/favicon.png',
-  '/manifest.webmanifest'
+  `/favicon.png?v=${VERSION}`,
+  `/manifest.webmanifest?v=${VERSION}`
 ];
 
 self.addEventListener('install', (event) => {
@@ -30,7 +30,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== STATIC_CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('shelter-static-') && k !== STATIC_CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -51,9 +51,12 @@ self.addEventListener('fetch', (event) => {
 
   // 문서(HTML) 요청: 항상 네트워크 우선 → 최신 목록을 보장, 실패 시에만 캐시 셸로 폴백
   if (req.mode === 'navigate') {
-    event.respondWith(
-      fetch(req).catch(() => caches.match('/index.html').then((r) => r || caches.match('/')))
-    );
+    // 관리자·개체별 문서를 공용 오프라인 셸로 바꾸지 않는다.
+    if (url.origin !== self.location.origin || !['/', '/index.html'].includes(url.pathname)) return;
+    event.respondWith(fetch(req).catch(async () => {
+      const cache = await caches.open(STATIC_CACHE);
+      return (await cache.match('/index.html')) || (await cache.match('/')) || Response.error();
+    }));
     return;
   }
 

@@ -597,7 +597,21 @@ function gotoAnimal(key) {
   }
 }
 
+// 버전 조회는 공개 API이므로 관리자 토큰을 보내지 않는다.
+// 네트워크 오류 시에도 HTML에 표시된 이 페이지의 배포 버전은 남겨 둔다.
+async function showAssetVersion() {
+  const label = document.getElementById('adminVersion');
+  if (!label) return;
+  try {
+    const res = await fetch('/api/version', { cache: 'no-store' });
+    if (!res.ok) return;
+    const { version } = await res.json();
+    if (typeof version === 'string' && version) label.textContent = `버전 ${version}`;
+  } catch (_) { /* 로그인·통계 화면의 동작과는 무관 */ }
+}
+
 // ---------- 시작 ----------
+showAssetVersion();
 if (token) {
   showAdmin();
   // 새로고침해도 보던 탭을 유지한다
