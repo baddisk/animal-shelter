@@ -12,7 +12,7 @@ let isModalOpen = false;
 let modalImages = [];
 let modalImageIndex = 0;
 let extraImagesCache = new Map();
-let currentDetailIndex = -1;
+let activeAnimal = null; // 목록이 재정렬되어도 열린 모달은 같은 개체를 참조한다.
 let currentLogs = null;            // 상세 모달의 케어 로그 (null = 로딩중)
 const logsCache = new Map();
 
@@ -93,12 +93,12 @@ function flushDwell() {
   const now = Date.now();
   const sec = Math.round((now - dwellSentAt) / 1000);
   if (sec < 1) return;
-  if (currentDetailIndex >= 0 && allAnimals[currentDetailIndex]) {
-    track('detail_close', getDesertionNo(allAnimals[currentDetailIndex]), { seconds: sec });
+  if (activeAnimal) {
+    track('detail_close', getDesertionNo(activeAnimal), { seconds: sec });
   }
   dwellSentAt = now;
-  const id = currentDetailIndex >= 0 && allAnimals[currentDetailIndex]
-    ? getDesertionNo(allAnimals[currentDetailIndex]) : null;
+  const id = activeAnimal
+    ? getDesertionNo(activeAnimal) : null;
   track('dwell_time', id, { seconds: sec });
 }
 
@@ -147,11 +147,12 @@ window.handleImgError = function (img) {
 };
 
 document.addEventListener('DOMContentLoaded', () => {
-  const now = new Date();
-  document.getElementById('endde').value = formatDateToYMD(now);
-  document.getElementById('bgnde').value = formatDateToYMD(
-    new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())
-  );
+  // 해외 기기·Render 서버의 시간대와 무관하게 같은 한국 날짜 범위를 쓴다.
+  const day = new Date(Date.now() + 9 * 3600_000), from = new Date(day);
+  from.setUTCFullYear(from.getUTCFullYear() - 1);
+  if (from.getUTCMonth() !== day.getUTCMonth()) from.setUTCDate(0);
+  document.getElementById('endde').value = day.toISOString().slice(0, 10);
+  document.getElementById('bgnde').value = from.toISOString().slice(0, 10);
   defaultFilterDates = {
     bgnde: document.getElementById('bgnde').value,
     endde: document.getElementById('endde').value
@@ -162,10 +163,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const bootId = window.__CARELINK_BOOT__ || null;
   pendingDetailId = bootId || parseDetailHash();
   pendingDetailSource = bootId ? 'link' : 'hash';
+  const cached = readListCache();
+  if (cached !== null) applyList(cached);
   searchAnimals(false);
 
   document.getElementById('searchBtn').addEventListener('click', () => {
-    currentPage = 1;
     searchAnimals(true);
   });
   
@@ -213,9 +215,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // 입양 문의(전화 걸기) 집계 — 위임 처리 (P1-1)
   document.getElementById('modalBody').addEventListener('click', (e) => {
     const tel = e.target && e.target.closest ? e.target.closest('a[href^="tel:"]') : null;
-    if (tel && currentDetailIndex >= 0 && allAnimals[currentDetailIndex]) {
-      track('adopt_inquiry', getDesertionNo(allAnimals[currentDetailIndex]));
-      track('reserve_click', getDesertionNo(allAnimals[currentDetailIndex]));
+    if (tel && activeAnimal) {
+      track('adopt_inquiry', getDesertionNo(activeAnimal));
+      track('reserve_click', getDesertionNo(activeAnimal));
     }
   });
 
@@ -225,13 +227,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   window.addEventListener('pagehide', flushDwell);
 });
-
-function formatDateToYMD(date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
 
 function setSearchBtnLoading(isLoading) {
   const btn = document.getElementById('searchBtn');
@@ -297,10 +292,8 @@ function setDetailHash(shareId) {
 function openDetailByShareId(shareId, opts = {}) {
   if (!shareId) return false;
   const target = String(shareId).trim().toLowerCase();
-  const idx = allAnimals.findIndex(a => {
-    const id = (a.shareId || getShareId(a)).toLowerCase();
-    return id && (id === target || id.endsWith(target) || target.endsWith(id));
-  });
+  const idx = allAnimals.findIndex(a => [a.shareId, getShareId(a), a.noticeNo, getDesertionNo(a)]
+    .some(id => id && String(id).trim().toLowerCase() === target));
   if (idx < 0) return false;
 
   const filtered = getFilteredAnimals();
@@ -341,53 +334,98 @@ function upkindFromStatsFilter(statsFilter) {
   return ({ dog: '417000', cat: '422400', etc: '429900' })[statsFilter] || '';
 }
 
-async function searchAnimals(forceRefresh = false) {
-  showLoading(true);
-  if (forceRefresh) setSearchBtnLoading(true);
-
-  const bgnde = document.getElementById('bgnde').value;
-  const endde = document.getElementById('endde').value;
-
-  // upkind를 API 요청에서 제외한다. 전체 목록을 보유해야 통계의 "보호중
-  // 개체수"가 축종 필터에 따라 줄어들지 않고, 축종별 숫자도 정확히 유지된다.
-  const params = new URLSearchParams({ bgnde, endde });
-  if (forceRefresh) params.append('refresh', '1');
-
+const LIST_CACHE_KEY = 'gs_list_v1';
+const LIST_TTL = 6 * 3600_000;
+let listRequest = 0, hasPaintedList = false;
+function listDates() {
+  return { bgnde:document.getElementById('bgnde').value, endde:document.getElementById('endde').value };
+}
+function listScope(dates) {
+  return dates.bgnde === defaultFilterDates.bgnde && dates.endde === defaultFilterDates.endde ? 'recent-year' : `${dates.bgnde}/${dates.endde}`;
+}
+function readListCache() {
   try {
-    const response = await fetch(`${API_BASE}/animals?${params}`, {
-      cache: forceRefresh ? 'no-store' : 'default'
-    });
-    const result = await response.json();
-    
-    allAnimals = result.items || [];
-    // 요청 도중 축종 선택이 바뀌어도 응답 시점의 최신 선택을 강조한다.
-    currentStatsFilter = statsFilterFromUpkind(document.getElementById('upkind').value);
-    currentStatusFilter = 'all';
-    currentPage = 1;
-    
-    updateStatsActiveCard();
-    const chips = document.getElementById('statusFilter');
-    if (chips) chips.querySelectorAll('.status-chip').forEach((c) => c.classList.toggle('active', c.dataset.status === 'all'));
-    renderPage(false);
-    updateStats();
-    updateStatusChips();
-    
-    if (pendingDetailId) {
-      // 최초 진입 딥링크 — 히스토리를 새로 쌓지 않고 현재 주소 위에서 연다
-      openDetailByShareId(pendingDetailId, { pushHistory: false, source: pendingDetailSource || 'link' });
-      pendingDetailId = null;
-      pendingDetailSource = null;
-    }
-    // 목록 강제 새로고침과 상세 사진(서버 30분 TTL)은 별도 캐시다.
-    // 상세 Map을 여기서 지우면 방금 본 카드를 다시 열 때 불필요한 요청이 생긴다.
-  } catch (error) {
-    console.error('데이터 조회 실패:', error);
-    allAnimals = [];
-    renderPage(false);
+    const c = JSON.parse(localStorage.getItem(LIST_CACHE_KEY) || 'null');
+    const age = Date.now() - c?.t, dates = listDates();
+    if (!c || !Number.isFinite(age) || age < 0 || age >= LIST_TTL || !Array.isArray(c.items) ||
+        (c.scope || 'recent-year') !== listScope(dates)) return null;
+    // 자정이 지나도 어제의 기본 목록을 먼저 쓸 수 있다. 범위를 벗어난 개체는 제외한다.
+    const from = dates.bgnde.replace(/-/g,''), to = dates.endde.replace(/-/g,'');
+    return c.items.filter(a => a && (!a.happenDt || ((!from || a.happenDt >= from) && (!to || a.happenDt <= to)))).map(cachedCard);
+  } catch (_) { return null; }
+}
+// 서버의 디스크 사본처럼 카드 복원에 필요한 동물 필드만 영속화한다.
+// 상담 전화·직원 정보·자유기재 위치/특징·케어 로그 제목을 localStorage에 넣지 않는다.
+function cachedCard(a) {
+  const r={};
+  const fields='desertionNo noticeNo happenDt noticeSdt noticeEdt processState updTm upKindCd upKindNm kindCd kindNm kindFullNm age weight sexCd neuterYn colorCd customStatus statusUpdatedAt logCount shareId shortCode'.split(' ');
+  for(const k of fields) if (typeof a[k]==='number' || (typeof a[k]==='string' && a[k].length<=160 && !/[<>@\r\n]/.test(a[k]) &&
+      !/\b\d{1,3}(?:\.\d{1,3}){3}\b|(?:^|\D)0\d{1,2}[- ]\d{3,4}[- ]\d{4}(?:$|\D)/.test(a[k]))) r[k]=a[k];
+  for(let i=1;i<=8;i++){
+    const k='popfile'+i,v=a[k];if(typeof v!=='string'||v.length>2048||/[<>"'\s\\]/.test(v))continue;
+    if(/^\/(img|uploads)\/[\w/.-]+$/i.test(v)&&!v.includes('..')){r[k]=v;continue;}
+    try{const u=new URL(v);if(['http:','https:'].includes(u.protocol)&&!u.port&&!u.hash&&!u.username&&!u.password&&!/;|@|%40/i.test(u.pathname)&&
+      (u.hostname==='animal.go.kr'||u.hostname.endsWith('.animal.go.kr')||u.hostname==='apis.data.go.kr')&&
+      [...u.searchParams].every(([k,x])=>(k==='pid'&&x==='desertion_shelter')||(k==='cmd'&&x==='fileDownload')||(/^(f_id|f_seq|fileNo|fileSn|fileId|atchFileId)$/i.test(k)&&/^\d{1,24}$/.test(x))))r[k]=v;}catch(_){}
   }
-
-  showLoading(false);
-  if (forceRefresh) setSearchBtnLoading(false);
+  return r;
+}
+function writeListCache(items, dates = listDates()) {
+  try { localStorage.setItem(LIST_CACHE_KEY, JSON.stringify({t:Date.now(), items:items.map(cachedCard), scope:listScope(dates)})); }
+  catch (_) { /* 사생활 보호 모드·용량 초과는 화면 동작에 영향 없음 */ }
+}
+function applyList(items) {
+  const x = window.scrollX, y = window.scrollY, preserve = hasPaintedList;
+  allAnimals = items;
+  currentPage = Math.min(currentPage, Math.max(1, Math.ceil(getFilteredAnimals().length / ITEMS_PER_PAGE)));
+  updateStatsActiveCard(); updateStats(); updateStatusChips(); renderPage(false);
+  // 오래된 캐시에서 연 모달도 연락처 등 최신 공개 정보로 갱신하되, 갤러리 DOM·선택·히스토리는 건드리지 않는다.
+  if (isModalOpen && activeAnimal) {
+    const key = a=>getDesertionNo(a)||a?.noticeNo;
+    const fresh=items.find(a=>key(a) && key(a)===key(activeAnimal));
+    const details=document.querySelector('#modalBody .modal-detail');
+    if(fresh && details){
+      // 개체 참조는 유지하되 새 응답에서 제거된 항목(예: 문의 전화)도 화면에서 지운다.
+      for (const k of Object.keys(activeAnimal)) if (!Object.prototype.hasOwnProperty.call(fresh,k)) delete activeAnimal[k];
+      Object.assign(activeAnimal,fresh);
+      const scroller=details.closest('.modal-content'), top=scroller?.scrollTop;
+      const notice=activeAnimal.noticeSdt&&activeAnimal.noticeEdt?`${formatDate(activeAnimal.noticeSdt)} ~ ${formatDate(activeAnimal.noticeEdt)}`:'정보 없음';
+      details.outerHTML=modalDetailHtml(activeAnimal,formatKind(activeAnimal.kindFullNm||activeAnimal.kindNm||activeAnimal.kindCd),
+        (activeAnimal.processState||'').includes('공고')?'📢 공고중':'🏠 보호중',notice);
+      if(scroller && top!=null)scroller.scrollTop=top;
+    }
+  }
+  hasPaintedList = true;
+  if (preserve && (x !== window.scrollX || y !== window.scrollY)) window.scrollTo({left:x, top:y, behavior:'instant'});
+  // 오래된 캐시에 QR 개체가 없으면 ID를 지우지 않고 새 목록이 올 때 한 번 더 찾는다.
+  if (!isModalOpen && pendingDetailId && openDetailByShareId(pendingDetailId, {pushHistory:false, source:pendingDetailSource || 'link'})) {
+    pendingDetailId = null; pendingDetailSource = null;
+  }
+}
+async function searchAnimals(forceRefresh = false) {
+  const serial = ++listRequest, dates = listDates();
+  const notice = document.getElementById('listNotice');
+  notice.hidden = true;
+  if (!hasPaintedList) showLoading(true);
+  if (forceRefresh) setSearchBtnLoading(true);
+  try {
+    const params = new URLSearchParams(dates);
+    const res = await fetch(`${API_BASE}/animals?${params}`, {cache:forceRefresh ? 'no-store' : 'no-cache'});
+    if (!res.ok) throw new Error('목록 요청 실패');
+    const {items} = await res.json();
+    if (serial !== listRequest || !Array.isArray(items)) return;
+    applyList(items);
+    // 렌더를 먼저 예약하고, 큰 JSON 직렬화·localStorage 쓰기는 그 뒤로 미룬다.
+    const save = () => { if (serial === listRequest) writeListCache(items, dates); };
+    if ('requestIdleCallback' in window) window.requestIdleCallback(save, {timeout:500}); else setTimeout(save,0);
+  } catch (_) {
+    if (serial !== listRequest) return;
+    notice.classList.toggle('cached-warning', hasPaintedList);
+    notice.textContent = hasPaintedList ? '새 목록을 받지 못해 마지막으로 불러온 목록을 표시합니다.' : '목록을 준비 중입니다. 잠시 후 다시 시도해 주세요.';
+    notice.hidden = false;
+  } finally {
+    if (serial === listRequest) { showLoading(false); setSearchBtnLoading(false); }
+  }
 }
 
 function getFilteredAnimals() {
@@ -565,9 +603,9 @@ async function fetchExtraImages(desertionNo) {
   if (!desertionNo) return [];
   const key = String(desertionNo);
 
-  // 빈 배열도 정상 캐시값이다. 기존 코드는 Map에 저장만 하고 읽지 않아 같은
-  // 카드를 다시 열 때마다 detail-images 요청을 반복했다.
-  if (extraImagesCache.has(key)) return extraImagesCache.get(key);
+  // 양수 결과만 잠시 재사용한다. 빈 결과는 다음 열람에서 다시 확인한다.
+  const hit = extraImagesCache.get(key);
+  if (hit && Date.now() - hit.at < 60_000) return hit.images;
   if (extraImagesInflight.has(key)) return extraImagesInflight.get(key);
 
   // refresh 를 강제하지 않는다 — 서버의 크롤링 캐시를 사용한다.
@@ -578,7 +616,8 @@ async function fetchExtraImages(desertionNo) {
       if (!response.ok) throw new Error(`detail-images ${response.status}`);
       const result = await response.json();
       const images = Array.isArray(result.images) ? result.images : [];
-      extraImagesCache.set(key, images);
+      if (images.length) extraImagesCache.set(key, {at:Date.now(), images});
+      else extraImagesCache.delete(key); // 작업 도중이었으면 다음 열람에서 새 결과를 읽는다.
       return images;
     } catch (_) {
       return [];
@@ -635,8 +674,8 @@ function renderPage(isAppend = false) {
   }
   noData.style.display = 'none';
 
-  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
-  const pageItems = filtered.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  const startIndex = isAppend ? (currentPage - 1) * ITEMS_PER_PAGE : 0;
+  const pageItems = filtered.slice(startIndex, currentPage * ITEMS_PER_PAGE);
 
   const html = pageItems.map((animal) => {
     const realIndex = allAnimals.indexOf(animal);
@@ -653,19 +692,19 @@ function renderPage(isAppend = false) {
     return `
       <div class="animal-card" onclick="showDetail(${realIndex})">
         <div class="card-image">
-          <img src="${imgSrc}"${imgSrc2x ? ` srcset="${imgSrc} 1x, ${imgSrc2x} 2x"` : ''} alt="${kindText}" loading="lazy" decoding="async" onerror="handleImgError(this)">
+          <img src="${imgSrc}"${imgSrc2x ? ` srcset="${imgSrc} 1x, ${imgSrc2x} 2x"` : ''} alt="${escapeHtml(kindText)}" loading="lazy" decoding="async" onerror="handleImgError(this)">
           <span class="card-badge ${badge.cls}" title="${escapeHtml(animal.processState || '')}">${badge.text}</span>
-          <span class="card-kind">${kindText}</span>
+          <span class="card-kind">${escapeHtml(kindText)}</span>
           ${logCount > 0 ? `<span class="card-news-pill" title="케어 기록 ${logCount}건"><i class="far fa-newspaper"></i> ${logCount}</span>` : ''}
         </div>
         <div class="card-body">
           <div class="card-title-row">
-            <h3>${animal.noticeNo || '공고번호 미상'}</h3>
+            <h3>${escapeHtml(animal.noticeNo || '공고번호 미상')}</h3>
             ${mngSuffix ? `<span class="card-mng-no" title="관리번호 ${escapeHtml(getDesertionNo(animal))}">#${mngSuffix}</span>` : ''}
           </div>
           <div class="card-info">
-            <div class="card-info-item"><i class="fas fa-map-marker-alt"></i><span>${animal.happenPlace || '일대'}</span></div>
-            <div class="card-info-item"><i class="fas fa-palette"></i><span>${animal.colorCd || '미상'} · ${animal.age || '미상'}</span></div>
+            <div class="card-info-item"><i class="fas fa-map-marker-alt"></i><span>${escapeHtml(animal.happenPlace || '일대')}</span></div>
+            <div class="card-info-item"><i class="fas fa-palette"></i><span>${escapeHtml(animal.colorCd || '미상')} · ${escapeHtml(animal.age || '미상')}</span></div>
             <div class="card-info-item"><i class="fas fa-venus-mars"></i><span>${sexNeuter}</span></div>
             ${animal.lastLog ? `<div class="card-info-item card-lastlog"><i class="fas fa-pen"></i><span>최근: ${escapeHtml(animal.lastLog.title)}</span></div>` : ''}
           </div>
@@ -876,8 +915,8 @@ function showModalImageByIndex(index) {
   upgradeModalMainImage(modalImageIndex);
 
   // 페인트를 막지 않도록 집계 전송은 다음 프레임 뒤로 미룬다.
-  if (modalImages.length > 1 && currentDetailIndex >= 0 && allAnimals[currentDetailIndex]) {
-    const animalId = getDesertionNo(allAnimals[currentDetailIndex]);
+  if (modalImages.length > 1 && activeAnimal) {
+    const animalId = getDesertionNo(activeAnimal);
     const photo = modalImageIndex + 1;
     setTimeout(() => track('photo_swipe', animalId, { photo }), 0);
   }
@@ -982,7 +1021,8 @@ async function showDetail(index, opts = {}) {
   const animal = allAnimals[index];
   if (!animal) return;
 
-  currentDetailIndex = index;
+  activeAnimal = animal;
+  if (!opts.source || opts.source === 'list') { pendingDetailId = null; pendingDetailSource = null; }
 
   const stateText = (animal.processState || '').includes('공고') ? '📢 공고중' : '🏠 보호중';
   const baseImages = extractAllImages(animal);
@@ -993,11 +1033,14 @@ async function showDetail(index, opts = {}) {
   modalImages = mergeAllImagesSmart(baseImages, []);
   modalImageIndex = 0; pointerActive = false; swipeLocked = null; pointerDeltaX = 0;
   currentLogs = null;
-  isModalGalleryLoading = !!desertionNo && !extraImagesCache.has(desertionNo);
+  const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0,10).replace(/-/g,'');
+  const mayHaveExtras = !!desertionNo && String(animal.noticeEdt || '').replace(/-/g,'') >= today &&
+    (!animal.noticeSdt || String(animal.noticeSdt).replace(/-/g,'') <= today) && baseImages.length <= 2;
+  isModalGalleryLoading = mayHaveExtras && !extraImagesCache.has(desertionNo);
 
   const noticePeriod = (animal.noticeSdt && animal.noticeEdt) ? `${formatDate(animal.noticeSdt)} ~ ${formatDate(animal.noticeEdt)}` : '정보 없음';
 
-  renderModalContent(animal, index, kindTitle, stateText, noticePeriod);
+  renderModalContent(animal, kindTitle, stateText, noticePeriod);
   document.getElementById('modal').style.display = 'flex';
   document.body.style.overflow = 'hidden';
   isModalOpen = true;
@@ -1023,8 +1066,8 @@ async function showDetail(index, opts = {}) {
   if (desertionNo) {
     // 사진과 로그를 독립 반영한다. 느린 크롤링이 로그 표시를 막거나, 완료 시점에
     // 모달 전체를 재렌더해 사용자가 선택한 사진을 1번으로 되돌리지 않는다.
-    fetchExtraImages(desertionNo).then((extraUrls) => {
-      if (!isModalOpen || currentDetailIndex !== index) return;
+    if (mayHaveExtras) fetchExtraImages(desertionNo).then((extraUrls) => {
+      if (!isModalOpen || activeAnimal !== animal) return;
 
       const hadImages = modalImages.length > 0;
       const selectedRawUrl = modalImages[modalImageIndex]?.rawUrl;
@@ -1033,12 +1076,12 @@ async function showDetail(index, opts = {}) {
       modalImageIndex = preservedIndex >= 0 ? preservedIndex : Math.max(0, Math.min(modalImageIndex, modalImages.length - 1));
       isModalGalleryLoading = false;
       // API 기본 사진이 전혀 없고 크롤링 사진만 발견된 경우에만 전체 구조를 한 번 만든다.
-      if (!hadImages && modalImages.length) renderModalContent(animal, index, kindTitle, stateText, noticePeriod);
+      if (!hadImages && modalImages.length) renderModalContent(animal, kindTitle, stateText, noticePeriod);
       else refreshModalGalleryControls();
     });
 
     fetchAnimalLogs(desertionNo).then((logs) => {
-      if (!isModalOpen || currentDetailIndex !== index) return;
+      if (!isModalOpen || activeAnimal !== animal) return;
       currentLogs = logs;
       const timeline = document.querySelector('.timeline-section');
       if (timeline) timeline.outerHTML = timelineHtml(animal, currentLogs);
@@ -1099,7 +1142,7 @@ function refreshModalGalleryControls() {
   setupModalImageNavigation();
 }
 
-function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
+function renderModalContent(animal, kindTitle, stateText, noticePeriod) {
   const images = modalImages;
   const safeIndex = Math.min(modalImageIndex, Math.max(0, images.length - 1));
   modalImageIndex = safeIndex;
@@ -1122,31 +1165,35 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
     galleryHtml = `<div class="modal-gallery-wrapper"><div class="modal-main-image-box"><img src="${PLACEHOLDER_SVG}" alt="사진 미등록"></div></div>`;
   }
 
+  document.getElementById('modalBody').innerHTML = galleryHtml + modalDetailHtml(animal,kindTitle,stateText,noticePeriod);
+  setupModalImageNavigation();
+}
+
+function modalDetailHtml(animal,kindTitle,stateText,noticePeriod) {
   const badge = badgeFor(animal);
   const stateValue = animal.customStatus
     ? `<span style="font-weight:bold; color:${badge.color};">${badge.text}</span> <span class="state-api-sub">(시스템: ${escapeHtml(stateText)})</span>`
     : `<span style="font-weight:bold; color:${badge.color};">${stateText}</span>`;
 
-  document.getElementById('modalBody').innerHTML = `
-    ${galleryHtml}
+  return `
     <div class="modal-detail">
       <div class="modal-title-row">
-        <h2>${animal.noticeNo || '공고'} (${kindTitle})</h2>
+        <h2>${escapeHtml(animal.noticeNo || '공고')} (${escapeHtml(kindTitle)})</h2>
         <div class="modal-title-actions">
-          <button type="button" class="btn-share-link" onclick="copyDetailLink(${index})"><i class="fas fa-link"></i> 링크 복사</button>
-          <button type="button" class="btn-share-link btn-share-sheet" onclick="shareDetail(${index})" aria-label="공유하기"><i class="fas fa-share-alt"></i> 공유</button>
+          <button type="button" class="btn-share-link" onclick="copyDetailLink()"><i class="fas fa-link"></i> 링크 복사</button>
+          <button type="button" class="btn-share-link btn-share-sheet" onclick="shareDetail()" aria-label="공유하기"><i class="fas fa-share-alt"></i> 공유</button>
         </div>
       </div>
 
       <div class="detail-grid">
         <div class="detail-item"><span class="label">보호 상태</span><span class="value">${stateValue}</span></div>
         <div class="detail-item"><span class="label">성별 / 중성화</span><span class="value">${getSexIcon(animal.sexCd)} / ${animal.neuterYn === 'Y' ? '중성화 완료' : '중성화 안됨'}</span></div>
-        <div class="detail-item"><span class="label">나이 / 체중</span><span class="value">${animal.age || '미상'} / ${animal.weight || '미상'}</span></div>
-        <div class="detail-item"><span class="label">털색</span><span class="value">${animal.colorCd || '미상'}</span></div>
-        <div class="detail-item full"><span class="label">발견 장소</span><span class="value">${animal.happenPlace || '정보 없음'}</span></div>
+        <div class="detail-item"><span class="label">나이 / 체중</span><span class="value">${escapeHtml(animal.age || '미상')} / ${escapeHtml(animal.weight || '미상')}</span></div>
+        <div class="detail-item"><span class="label">털색</span><span class="value">${escapeHtml(animal.colorCd || '미상')}</span></div>
+        <div class="detail-item full"><span class="label">발견 장소</span><span class="value">${escapeHtml(animal.happenPlace || '정보 없음')}</span></div>
         <div class="detail-item"><span class="label">접수일자</span><span class="value">${formatDate(animal.happenDt)}</span></div>
         <div class="detail-item"><span class="label">공고 기간</span><span class="value">${noticePeriod}</span></div>
-        <div class="detail-item full"><span class="label">특징 및 건강상태</span><span class="value" style="background:#F0FDF4; padding:8px 10px; border-radius:6px; line-height:1.4;">${animal.specialMark || '특이사항 없음'}</span></div>
+        <div class="detail-item full"><span class="label">특징 및 건강상태</span><span class="value" style="background:#F0FDF4; padding:8px 10px; border-radius:6px; line-height:1.4;">${escapeHtml(animal.specialMark || '특이사항 없음')}</span></div>
       </div>
 
       ${timelineHtml(animal, currentLogs)}
@@ -1154,10 +1201,10 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
       <div class="shelter-info">
         <h3 class="shelter-title"><i class="fas fa-home"></i> 입양 문의처</h3>
         <div class="detail-grid shelter-grid">
-          <div class="detail-item full"><span class="label">보호센터명</span><span class="value" style="font-weight:bold;">${animal.careNm || '강화군 동물보호센터'}</span></div>
-          <div class="detail-item full"><span class="label">보호소 주소</span><span class="value">${animal.careAddr || '인천광역시 강화군'}</span></div>
+          <div class="detail-item full"><span class="label">보호센터명</span><span class="value" style="font-weight:bold;">${escapeHtml(animal.careNm || '강화군 동물보호센터')}</span></div>
+          <div class="detail-item full"><span class="label">보호소 주소</span><span class="value">${escapeHtml(animal.careAddr || '인천광역시 강화군')}</span></div>
           <div class="detail-item"><span class="label">전화번호</span><span class="value">${animal.careTel ? `<a href="tel:${animal.careTel}" style="color:#FF6B35; font-weight:bold; font-size:1.05rem;">📞 ${animal.careTel}</a>` : '정보 없음'}</span></div>
-          <div class="detail-item"><span class="label">관할 부서</span><span class="value">${animal.orgNm || '강화군'} (${animal.officetel || animal.chargeNm || '문의'})</span></div>
+          <div class="detail-item"><span class="label">관할 부서</span><span class="value">${escapeHtml(animal.orgNm || '강화군')} (문의)</span></div>
         </div>
 
         <a href="https://www.instagram.com/ganghwa_animal_care/" target="_blank" rel="noopener noreferrer" class="insta-brand-link" title="인스타그램으로 이동">
@@ -1172,15 +1219,14 @@ function renderModalContent(animal, index, kindTitle, stateText, noticePeriod) {
       </div>
     </div>
   `;
-  setupModalImageNavigation();
 }
 
 window.selectModalImage = function (idx) {
   if (typeof idx === 'number' && idx >= 0 && idx < modalImages.length) showModalImageByIndex(idx);
 };
 
-window.copyDetailLink = async function (index) {
-  const animal = allAnimals[index];
+window.copyDetailLink = async function () {
+  const animal = activeAnimal;
   if (!animal) return;
   const url = getDetailShareUrl(animal);
   const btn = document.querySelector('.btn-share-link');
@@ -1197,8 +1243,8 @@ window.copyDetailLink = async function (index) {
 
 // 모바일 공유 시트 (P1-4) — "카카오톡으로 보내기 / 문자로 보내기"가 바로 뜬다.
 // 미지원 브라우저에서는 링크 복사로 동작한다.
-window.shareDetail = async function (index) {
-  const animal = allAnimals[index];
+window.shareDetail = async function () {
+  const animal = activeAnimal;
   if (!animal) return;
   const url = getDetailSharePageUrl(animal);
   const title = `${formatKind(animal.kindFullNm || animal.kindNm || animal.kindCd)} 아이의 정보입니다`;
@@ -1209,7 +1255,7 @@ window.shareDetail = async function (index) {
       track('link_share', getDesertionNo(animal));
     } catch (_) { /* 사용자가 공유를 취소한 경우 */ }
   } else {
-    window.copyDetailLink(index); // 폴백: 클립보드 복사(링크_copy 로 집계)
+    window.copyDetailLink(); // 폴백: 클립보드 복사(링크_copy 로 집계)
   }
 };
 
@@ -1226,7 +1272,7 @@ function closeModal(options = {}) {
   document.body.style.overflow = '';
   isModalOpen = false;
   modalHistoryPushed = false;
-  currentDetailIndex = -1;
+  activeAnimal = null;
   modalImages = [];
   modalImageIndex = 0;
   modalImageLoadToken++;

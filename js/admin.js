@@ -72,6 +72,7 @@ function showAdmin() {
   document.getElementById('loginView').style.display = 'none';
   document.getElementById('adminView').style.display = 'block';
   loadAnimals();
+  loadSyncStatus();
 }
 
 async function adminLogin() {
@@ -103,37 +104,47 @@ async function adminLogout() {
 }
 
 // ---------- 개체 목록 ----------
-// ✅ 수정: 기존에는 loadAnimals() 가 "항상" refresh=1 을 보냈다.
-//    그런데 이 함수는 상태 변경·케어로그 추가/수정/삭제 직후마다 호출된다(258·284·313행).
-//    즉 관리자 작업 1건 = 서버 동물목록 캐시 무효화 + 최대 20페이지 재조회.
-//    게다가 서버는 refresh=1 을 받으면 detailImageCache 까지 전부 비웠으므로
-//    케어로그 한 줄 저장 → 방문자 전원이 사진 재크롤링(개체당 약 16 아웃바운드) 이었다.
-//    → 평소에는 캐시를 쓰고, 새로고침 버튼을 눌렀을 때만 강제 조회한다.
-async function loadAnimals(forceRefresh = false) {
-  const listEl = document.getElementById('adminList');
-  listEl.innerHTML = '<div class="admin-list-empty"><i class="fas fa-circle-notch fa-spin"></i> 개체 목록 불러오는 중...</div>';
-
-  // 조회기간을 넉넉하게(최근 2년) 명시 지정 → 기본 기간 조회로 인한 목록 누락 방지
-  const ymd = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-  const now = new Date(Date.now() + 9 * 3600 * 1000); // KST
-  const qs = new URLSearchParams({
-    bgnde: ymd(new Date(now.getFullYear() - 2, now.getMonth(), now.getDate())),
-    endde: ymd(now)
-  });
-  if (forceRefresh) qs.set('refresh', '1');
-
+function showSyncStatus(s) {
+  const clock = s.syncedAt ? new Intl.DateTimeFormat('ko-KR', {timeZone:'Asia/Seoul', hour:'2-digit', minute:'2-digit', hourCycle:'h23'}).format(new Date(s.syncedAt)) : '아직 없음';
+  document.getElementById('syncInfo').textContent = `마지막 동기화 ${clock} · 크롤링 대상 ${s.crawlTargets ?? 0}마리` +
+    (s.running ? ' · 동기화 중' : '') + (s.diskOK === false ? ' · 디스크 저장 실패' : '');
+}
+let syncingNow = false;
+async function loadSyncStatus() {
+  if (!token || syncingNow) return;
+  try { showSyncStatus(await api('/api/admin/sync', {cache:'no-store'})); }
+  catch (_) { document.getElementById('syncInfo').textContent = '동기화 상태를 확인할 수 없습니다.'; }
+}
+async function syncNow() {
+  if (syncingNow) return;
+  syncingNow = true;
+  const btn = document.getElementById('syncNow');
+  btn.disabled = true; btn.textContent = '동기화 중…';
   try {
-    const res = await fetch(`/api/animals?${qs}`);
+    const result = await api('/api/admin/sync', {method:'POST', cache:'no-store'});
+    showSyncStatus(result); await loadAnimals();
+    toast(result.diskOK ? '동기화가 끝났습니다.' : '목록은 갱신됐지만 디스크에 저장하지 못했습니다.');
+  } catch (e) { toast(e.message || '동기화하지 못했습니다.'); }
+  finally { syncingNow = false; btn.disabled = false; btn.textContent = '지금 동기화'; loadSyncStatus(); }
+}
+setInterval(() => { if (!document.hidden && token) loadSyncStatus(); }, 60_000);
+async function loadAnimals() {
+  const listEl = document.getElementById('adminList');
+  // 보호 상태·케어 기록 저장 직후에도 60초 된 HTTP 캐시 대신 최신 메모리 목록을 받는다.
+  try {
+    const res = await fetch('/api/animals', {cache:'no-store'});
+    if (!res.ok) throw new Error('목록 조회 실패');
     const data = await res.json();
     animals = data.items || [];
   } catch (_) {
-    animals = [];
+    if (!animals.length) listEl.textContent = '목록을 준비 중입니다. 잠시 후 다시 확인해 주세요.';
+    return;
   }
 
   const headerHtml = `
     <div class="admin-list-header">
       <span><i class="fas fa-list"></i> 보호중 개체 <b>${animals.length}</b>마리</span>
-      <button type="button" class="icon-btn edit" title="목록 새로고침(강제 재조회)" onclick="loadAnimals(true)"><i class="fas fa-sync-alt"></i></button>
+      <button type="button" class="icon-btn edit" title="저장된 목록 다시 읽기" onclick="loadAnimals()"><i class="fas fa-sync-alt"></i></button>
     </div>`;
 
   if (!animals.length) {
@@ -210,6 +221,7 @@ function renderPanel(opt = {}) {
     </div>
 
     <h3>${editingLogId ? '✏️ 기록 수정 중' : '③ 새 기록 추가'}</h3>
+    <p class="admin-hint">케어 기록은 공개됩니다. 담당자·신청자의 이름이나 연락처 등 개인정보는 입력하지 마세요.</p>
     <div class="admin-field">
       <label>날짜 *</label>
       <input type="date" id="logDate" value="${todayStr()}">
@@ -472,7 +484,7 @@ function renderStats(s) {
     </div>
 
     <p class="admin-hint">
-      ※ 개인정보는 수집하지 않습니다. 방문자 식별자 없이 집계 수치만 저장됩니다.
+      ※ 새 이용 통계는 방문자 식별자 없이 일별 합계로만 저장합니다. 이전 버전의 통계는 읽기 전용으로 합산합니다.
       ${s.fromCache ? ' · 1분 캐시된 결과' : ''}
     </p>
   `;

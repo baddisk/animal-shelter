@@ -35,6 +35,11 @@
       </div>
     </div>
 
+    <div class="sync-strip">
+      <span id="syncInfo" role="status">마지막 동기화 확인 중…</span>
+      <button type="button" id="syncNow" class="btn-ghost" onclick="syncNow()">지금 동기화</button>
+    </div>
+
     <!-- 탭 -->
     <div class="admin-tabs" role="tablist">
       <button class="admin-tab active" id="tabBtnCare" role="tab" onclick="switchTab('care')">

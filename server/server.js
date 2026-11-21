@@ -5,6 +5,8 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const pkg = require('../package.json');
+const dataPath = require('../lib/dataPath');
+const { createAnimalSync, apiPhotoCount, filterAnimals, CRAWL_DELAY_MS } = require('../services/animalSync');
 const https = require('https');
 const http = require('http');
 
@@ -44,7 +46,9 @@ app.use((req, res, next) => {
 });
 // 원본 HTML 템플릿이 정적 파일로 먼저 나가지 않게 한다.
 app.get(['/', '/index.html'], (req, res) => {
-  res.set('Cache-Control', 'no-cache').type('html').send(renderHtml('index.html'));
+  const home = renderHtml('index.html');
+  res.set('Cache-Control', 'no-cache').type('html').send(req.query.share === 'pending'
+    ? home.replace('id="sharePending" hidden', 'id="sharePending"') : home);
 });
 app.get('/admin.html', (req, res) => {
   res.set('Cache-Control', 'no-store').type('html').send(renderHtml('admin.html'));
@@ -57,14 +61,10 @@ app.get('/sw.js', (req, res) => {
   res.set('Cache-Control', 'no-cache').type('application/javascript').send(workerScript);
 });
 
-const httpsAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
+const httpsAgent = new https.Agent({ keepAlive: true });
 const httpAgent = new http.Agent({ keepAlive: true });
-const BASE_URL = 'http://apis.data.go.kr/1543061/abandonmentPublicService_v2';
+const BASE_URL = 'https://apis.data.go.kr/1543061/abandonmentPublicService_v2';
 
-const animalCache = new Map();
-const CACHE_TTL = 10 * 60 * 1000; // 10분
-const detailImageCache = new Map();
-const DETAIL_CACHE_TTL = 30 * 60 * 1000; // 30분
 let cachedGanghwaParams = null;
 
 // ==============================================================
@@ -105,8 +105,8 @@ function saveDB() {
 //    없으면 기존처럼 로컬 data/db.json 에 저장 (개발용)
 // ==============================================================
 let mongoColl = null;
-let mongoEventsColl = null;
-(async () => {
+let mongoEventsColl = null, mongoDailyColl = null;
+const dbReady = (async () => {
   if (!process.env.MONGODB_URI) return;
   try {
     const { MongoClient } = require('mongodb');
@@ -114,6 +114,7 @@ let mongoEventsColl = null;
     await client.connect();
     const mdb = client.db(process.env.MONGODB_DB || 'shelter');
     mongoColl = mdb.collection('animals');
+    mongoDailyColl = mdb.collection('events_daily');
     mongoEventsColl = mdb.collection('events'); // 📊 이용 집계(P1-1)
     const docs = await mongoColl.find({}).toArray();
     for (const d of docs) {
@@ -122,11 +123,15 @@ let mongoEventsColl = null;
     }
     console.log(`☁️ MongoDB 연결 완료 (기록 ${docs.length}개체 로드)`);
   } catch (e) {
-    console.error('⚠️ MongoDB 연결 실패 → 로컬 파일 모드로 동작:', e.message);
+    console.error('⚠️ MongoDB 연결 실패 → 로컬 파일 모드로 동작합니다.');
     mongoColl = null;
-    mongoEventsColl = null;
+    mongoEventsColl = null; mongoDailyColl = null;
   }
 })();
+
+// MongoDB를 쓰는 경우에만 부팅 시의 최초 케어 로딩을 공유한다. 목록 자체는 계속 RAM에서 읽는다.
+// 스냅샷이 더 빨리 열려도 임시보호를 일반 보호로 표기하거나, 읽기 전 상태를 변경하지 않는다.
+if (process.env.MONGODB_URI) app.use(['/api/animals','/api/admin/animals'], (_req,_res,next) => { dbReady.then(()=>next(),next); });
 
 async function persistAnimal(key) {
   const rec = db.animals[key];
@@ -192,7 +197,7 @@ function enrichItem(item) {
 }
 
 // ---- 관리자 인증 (간단 토큰 방식) ----
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'shelter1234';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || ''; // 운영 비밀번호가 없으면 로그인을 열지 않는다.
 const adminSessions = new Set();
 function tokenOf(req) {
   return String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -203,6 +208,7 @@ function requireAdmin(req, res, next) {
   next();
 }
 app.post('/api/admin/login', (req, res) => {
+  if (!ADMIN_PASSWORD) return res.status(503).json({error:'서버에 관리자 비밀번호 설정이 필요합니다.'});
   if (String(req.body?.password || '') !== ADMIN_PASSWORD) {
     return res.status(403).json({ error: '비밀번호가 올바르지 않습니다.' });
   }
@@ -217,57 +223,22 @@ app.post('/api/admin/logout', (req, res) => {
 });
 
 // ==============================================================
-// 📊 이용 집계 (P1-1) — 개인정보는 일절 담지 않고 집계값만 남긴다
-//    MONGODB_URI 가 있으면 events 컬렉션에, 없으면 data/events.json 에 저장.
-//    화면은 sendBeacon 으로 보내므로 페이지를 닫아도 전송이 보장된다.
-// ==============================================================
+// 📊 T8 선행 기록은 읽기 전용, 신규 방문은 일별 합계만 기록한다.
+// 이름·연락처·IP·원문 meta·방문 시각·방문자 식별자는 저장하지 않는다.
+const {counter,createCounters} = require('../lib/anonymousStats');
 const EVENTS_PATH = path.join(DATA_DIR, 'events.json');
-const TRACK_EVENTS = new Set([
-  'page_view', 'link_open', 'detail_open', 'detail_close', 'photo_swipe', 'dwell_time',
-  'filter_used', 'adopt_inquiry', 'reserve_click', 'similar_click', 'link_share', 'link_copy'
-]);
 let eventsLocal = [];
-try { eventsLocal = JSON.parse(fs.readFileSync(EVENTS_PATH, 'utf8') || '[]'); } catch (_) { /* 최초 실행 */ }
-
-function sanitizeMeta(meta) {
-  if (!meta || typeof meta !== 'object') return {};
-  const out = {};
-  for (const [k, v] of Object.entries(meta).slice(0, 12)) {
-    const key = String(k).slice(0, 32);
-    if (typeof v === 'number' && Number.isFinite(v)) out[key] = Math.round(v * 100) / 100;
-    else if (typeof v === 'boolean') out[key] = v;
-    else if (typeof v === 'string') out[key] = v.slice(0, 120);
-  }
-  return out;
-}
-
-let eventsSaveTimer = null;
-function persistEvent(rec) {
-  if (mongoEventsColl) {
-    mongoEventsColl.insertOne(rec).catch(() => {});
-    return;
-  }
-  eventsLocal.push(rec);
-  if (eventsLocal.length > 20000) eventsLocal.splice(0, eventsLocal.length - 20000);
-  clearTimeout(eventsSaveTimer);
-  eventsSaveTimer = setTimeout(() => {
-    try { fs.writeFileSync(EVENTS_PATH, JSON.stringify(eventsLocal)); }
-    catch (e) { console.error('📊 이벤트 저장 실패:', e.message); }
-  }, 500);
-}
-
-app.post('/api/track', (req, res) => {
+try { const old = JSON.parse(fs.readFileSync(EVENTS_PATH, 'utf8')); if(Array.isArray(old)) eventsLocal=old; } catch (_) {}
+const dailyCounters = createCounters(path.join(DATA_DIR,'events-daily.json'),()=>mongoDailyColl);
+process.once('exit', dailyCounters.flush);
+app.post('/api/track', async (req, res) => {
   try {
-    const { event, id, meta } = req.body || {};
-    if (TRACK_EVENTS.has(event)) {
-      persistEvent({
-        ts: new Date().toISOString(),
-        event,
-        id: String(id ?? '').slice(0, 64) || null,
-        meta: sanitizeMeta(meta)
-      });
-    }
-  } catch (_) { /* 집계 실패가 화면 동작에 영향 주지 않도록 */ }
+    const r = counter(req.body, Date.now(), id => {
+      if (typeof id !== 'string' && typeof id !== 'number') return null;
+      const a=animalSync.findByShareId(String(id)); return a ? animalKeyOf(a) : null;
+    });
+    if (r) { await dbReady; await dailyCounters.add(r); }
+  } catch (_) { console.warn('[통계] 익명 합계를 기록하지 못했습니다.'); }
   res.status(204).end();
 });
 
@@ -275,7 +246,7 @@ app.post('/api/track', (req, res) => {
 // 📈 통계 집계 API (관리자 전용)
 //    /api/track 으로 쌓인 이벤트를 관리자 화면이 바로 그릴 수 있는
 //    형태(요약 KPI · 일별 추이 · 퍼널 · 개체 TOP)로 계산해 내려준다.
-//    - 저장소: MONGODB_URI 있으면 events 컬렉션, 없으면 data/events.json
+//    - 과거 events는 읽기만. 새 입력은 events_daily 또는 data/events-daily.json.
 //    - 개인정보는 애초에 수집하지 않으므로 집계값만 오간다.
 // ==============================================================
 const STATS_MAX_DAYS = 365;
@@ -297,14 +268,19 @@ function kstDayStartISO(daysAgo) {
 
 // 기간 내 이벤트 읽기 (저장소 무관 동일 인터페이스)
 async function readEvents(fromISO) {
-  if (mongoEventsColl) {
-    return await mongoEventsColl
-      .find({ ts: { $gte: fromISO } })
-      .project({ _id: 0, ts: 1, event: 1, id: 1, meta: 1 })
-      .limit(200000)
-      .toArray();
+  await dbReady;
+  const legacy = mongoEventsColl ? await mongoEventsColl.find({ts:{$gte:fromISO}})
+    .project({_id:0, ts:1, event:1, id:1, meta:1}).limit(200000).toArray() : eventsLocal.filter(e=>String(e.ts)>=fromISO);
+  // 과거 통계를 재기록하지 않는다. 기존 자료도 화면으로 임의 문자열을 내보내지 않는다.
+  const bins = await dailyCounters.read(kstDateStr(fromISO));
+  for (const e of legacy) {
+    const r=counter(e,Date.parse(e.ts),id=>{
+      const a=animalSync.findByShareId(String(id||''));
+      return a?animalKeyOf(a):(/^\d{12,18}$/.test(String(id||''))?String(id):null);
+    });
+    if(r)bins.push(r);
   }
-  return eventsLocal.filter((e) => String(e.ts) >= fromISO);
+  return bins;
 }
 
 function emptyDay(date) {
@@ -345,50 +321,19 @@ async function buildStats(days) {
 
   for (const e of events) {
     const ev = String(e.event || '');
-    const date = kstDateStr(e.ts);
-    const day = daily.get(date);
-    byEvent[ev] = (byEvent[ev] || 0) + 1;
-    const meta = e.meta || {};
-
-    if (day) {
-      if (ev === 'page_view') day.page_view++;
-      else if (ev === 'detail_open') day.detail_open++;
-      else if (ev === 'link_open') {
-        day.link_open++;
-        if (meta.path === 'link') day.link_from_link++; else day.link_from_list++;
-      } else if (ev === 'adopt_inquiry') day.adopt_inquiry++;
-      else if (ev === 'reserve_click') day.reserve_click++;
-      else if (ev === 'link_share' || ev === 'link_copy') day.share++;
-      else if (ev === 'photo_swipe') day.photo_swipe++;
+    const day = daily.get(e.day), n=e.count;
+    if(!day || !Number.isSafeInteger(n) || n<1) continue;
+    byEvent[ev] = (byEvent[ev] || 0) + n;
+    const meta=e.meta||{};
+    if (['page_view','detail_open','link_open','adopt_inquiry','reserve_click','photo_swipe'].includes(ev)) day[ev]+=n;
+    if(ev==='link_open') day[meta.path==='link'?'link_from_link':'link_from_list']+=n;
+    if(ev==='link_share'||ev==='link_copy') day.share+=n;
+    if(ev==='dwell_time'){dwellSum+=e.secSum;dwellCount+=e.secN;day.dwell_sec+=e.secSum;}
+    if(ev==='detail_close' && e.id && e.secN){const a=animalOf(e.id);a.dwell_sec+=e.secSum;a.dwell_n+=e.secN;}
+    if(e.id && ['detail_open','adopt_inquiry','photo_swipe','link_share','link_copy'].includes(ev)){
+      const a=animalOf(e.id); a[['link_share','link_copy'].includes(ev)?'share':ev]+=n;
     }
-
-    if (ev === 'dwell_time' || ev === 'detail_close') {
-      const sec = Number(meta.seconds);
-      if (ev === 'dwell_time' && Number.isFinite(sec) && sec > 0 && sec < 3600) {
-        dwellSum += sec; dwellCount++;
-        if (day) day.dwell_sec += sec;
-      }
-      if (ev === 'detail_close' && Number.isFinite(sec) && sec > 0 && sec < 3600 && e.id) {
-        const a = animalOf(e.id);
-        a.dwell_sec += sec; a.dwell_n++;
-      }
-    }
-
-    if (e.id && ['detail_open', 'adopt_inquiry', 'photo_swipe', 'link_share', 'link_copy'].includes(ev)) {
-      const a = animalOf(e.id);
-      if (ev === 'detail_open') a.detail_open++;
-      else if (ev === 'adopt_inquiry') a.adopt_inquiry++;
-      else if (ev === 'photo_swipe') a.photo_swipe++;
-      else a.share++;
-    }
-
-    if (ev === 'filter_used') {
-      for (const [k, v] of Object.entries(meta)) {
-        if (k === 'bgnde' || k === 'endde') continue; // 날짜는 종류가 너무 많아 순위가 무의미
-        const label = `${k}=${v}`;
-        filterUse.set(label, (filterUse.get(label) || 0) + 1);
-      }
-    }
+    if(ev==='filter_used')for(const [k,v] of Object.entries(meta)){const label=`${k}=${v}`;filterUse.set(label,(filterUse.get(label)||0)+n);}
   }
 
   const series = [...daily.values()];
@@ -401,7 +346,7 @@ async function buildStats(days) {
     reserve_click: byEvent.reserve_click || 0,
     share: (byEvent.link_share || 0) + (byEvent.link_copy || 0),
     filter_used: byEvent.filter_used || 0,
-    events: events.length,
+    events: Object.values(byEvent).reduce((sum,n)=>sum+n,0),
     animals_viewed: perAnimal.size,
     avg_dwell_sec: dwellCount ? Math.round((dwellSum / dwellCount) * 10) / 10 : 0,
     total_dwell_sec: Math.round(dwellSum)
@@ -495,8 +440,8 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
     statsCache.set(cacheKey, { ts: Date.now(), data });
     res.json({ ...data, fromCache: false });
   } catch (e) {
-    console.error('📈 통계 집계 실패:', e.message);
-    res.status(500).json({ error: e.message });
+    console.error('📈 통계 집계를 읽지 못했습니다.');
+    res.status(500).json({ error: '통계를 읽지 못했습니다.' });
   }
 });
 
@@ -514,7 +459,7 @@ app.get('/api/admin/stats/export.csv', requireAdmin, async (req, res) => {
     res.set('Content-Disposition', `attachment; filename="carelink-stats-${s.range.from}_${s.range.to}.csv"`);
     res.send('\uFEFF' + [head, ...rows].join('\n') + '\n');
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: '통계를 읽지 못했습니다.' });
   }
 });
 
@@ -537,17 +482,6 @@ function shareIdOf(item) {
   const m = id.match(/(\d{4}-\d+)/);
   return (m ? m[1] : id) || raw.trim();
 }
-function sameId(a, b) {
-  a = String(a || '').trim().toLowerCase();
-  b = String(b || '').trim().toLowerCase();
-  return !!a && !!b && (a === b || a.endsWith(b) || b.endsWith(a));
-}
-function animalMatchesId(item, id) {
-  return sameId(shareIdOf(item), id)
-    || sameId(String(item?.desertionNo || ''), id)
-    || sameId(String(item?.noticeNo || ''), id);
-}
-
 // 문자 전송에 유리한 짧은 코드 (P1-3) — 결정적(deterministic)이라 별도 저장이 필요 없다
 function shortCodeOf(id) {
   const h = crypto.createHash('sha256').update(String(id)).digest('hex');
@@ -565,29 +499,16 @@ function kindTextOf(item) {
     .replace(/^\[(개|고양이|기타축종)\]\s*/, '$1 ');
 }
 
-// 보호중 개체 전체 (캐시 우선 — OG·사이트맵은 몇 분 뒤처져도 안전)
-let allAnimalsFallback = { ts: 0, items: [] };
-let allAnimalsFetching = null;
-async function getAllAnimals() {
-  const merged = [];
-  for (const entry of animalCache.values()) merged.push(...entry.items);
-  if (merged.length) return merged;
-  if (!process.env.API_KEY) return MOCK_ANIMALS.map(enrichItem);
-  if (Date.now() - allAnimalsFallback.ts < 60 * 1000 && allAnimalsFallback.items.length) {
-    return allAnimalsFallback.items;
-  }
-  if (allAnimalsFetching) return allAnimalsFetching;
-  allAnimalsFetching = (async () => {
-    const items = await fetchGanghwaAnimalsFromApi({});
-    allAnimalsFallback = { ts: Date.now(), items };
-    return items;
-  })().finally(() => { allAnimalsFetching = null; });
-  return allAnimalsFetching;
+// 통계·사이트맵도 목록 캐시를 따로 만들거나 외부로 요청하지 않는다.
+function getAllAnimals() { return animalSync.getSnapshot().items; }
+async function lookupWithOneRetry(find) {
+  const hit = find();
+  if (hit) return hit;
+  await animalSync.refreshForShareMiss(); // 동시에 놓친 QR은 새 목록 조회 한 번을 공유한다.
+  return find();
 }
-
-async function findAnimalById(id) {
-  const items = await getAllAnimals();
-  return items.find((it) => animalMatchesId(it, id)) || null;
+function pendingShare(res) {
+  return res.set('Cache-Control', 'no-store').redirect(302, '/?share=pending');
 }
 
 function ogTagsFor(req, animal) {
@@ -601,9 +522,7 @@ function ogTagsFor(req, animal) {
   if (animal.happenPlace) bits.push(`${animal.happenPlace} 구조`);
   if (animal.age) bits.push(animal.age);
   if (animal.weight) bits.push(String(animal.weight).replace(/\(Kg\)/i, 'kg'));
-  const extraCached = detailImageCache.get(String(animal.desertionNo || ''));
-  const photoCount = ['popfile1', 'popfile2', 'popfile3', 'popfile4']
-    .filter((k) => animal[k]).length + (extraCached?.images?.length || 0);
+  const photoCount = apiPhotoCount(animal) + animalSync.getImages(animalKeyOf(animal)).length;
   const photoText = photoCount > 1 ? `사진 ${photoCount}장과 상세정보를 확인하세요` : '사진과 상세정보를 확인하세요';
   const desc = `${bits.join(' · ')} · ${photoText}`;
 
@@ -637,15 +556,10 @@ function ogTagsFor(req, animal) {
 
 app.get(['/a/:id', '/p/:id'], async (req, res, next) => {
   res.set('Cache-Control', 'no-cache');
-  const id = decodeURIComponent(String(req.params.id || '')).trim();
-  let animal = null;
-  try { animal = await findAnimalById(id); } catch (_) { /* 아래 404로 */ }
-
-  if (!animal) {
-    return res.status(404)
-      .set('Content-Type', 'text/html; charset=utf-8')
-      .send('<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="noindex"><title>페이지를 찾을 수 없습니다 | 강화유기동물보호센터</title></head><body style="font-family:sans-serif;text-align:center;padding:60px 20px;color:#1E293B;"><h1>🐾</h1><p>찾으시는 개체 정보가 없습니다.<br>입소·공고가 종료되었을 수 있습니다.</p><p><a href="/" style="color:#FF6B35;font-weight:bold;">보호중인 아이들 보러가기 →</a></p></body></html>');
-  }
+  const id = String(req.params.id || '').trim();
+  if (!id || id.length > 80) return pendingShare(res);
+  const animal = await lookupWithOneRetry(() => animalSync.findByShareId(id));
+  if (!animal) return pendingShare(res);
 
   const shareId = shareIdOf(animal);
   // 공통 템플릿만 캐시한다. OG와 모달 시작 ID는 요청마다 별도로 넣는다.
@@ -668,13 +582,9 @@ app.get(['/a/:id', '/p/:id'], async (req, res, next) => {
 // 짧은 공유 주소 /s/:코드 → /a/:공유아이디 로 넘긴다 (P1-3, 문자 요금 절약)
 app.get('/s/:code', async (req, res) => {
   const code = String(req.params.code || '').trim().toLowerCase();
-  if (!/^[0-9a-z]{3,12}$/.test(code)) return res.status(404).send('Not Found');
-  let hit = null;
-  try {
-    const items = await getAllAnimals();
-    hit = items.find((it) => shortCodeOf(shareIdOf(it)) === code) || null;
-  } catch (_) { /* 아래 404로 */ }
-  if (!hit) return res.status(404).send('Not Found');
+  if (!/^[0-9a-z]{3,12}$/.test(code)) return pendingShare(res);
+  const hit = await lookupWithOneRetry(() => animalSync.findByShortCode(code));
+  if (!hit) return pendingShare(res);
   res.set('Cache-Control', 'public, max-age=300');
   return res.redirect(302, `/a/${encodeURIComponent(shareIdOf(hit))}`);
 });
@@ -844,24 +754,18 @@ const MOCK_ANIMALS = [
 const MOCK_EXTRA_IMAGES = {
   '2026081500012': ['/img/mock_care1.jpg', '/img/mock_dog3.jpg']
 };
-function mockFilterItems(q = {}) {
-  return MOCK_ANIMALS.filter((a) => {
-    if (q.upkind === '417000' && !a.kindFullNm.startsWith('[개]')) return false;
-    if (q.upkind === '422400' && !a.kindFullNm.startsWith('[고양이]')) return false;
-    if (q.upkind === '429900' && !a.kindFullNm.startsWith('[기타축종]')) return false;
-    const dt = String(a.happenDt);
-    if (q.bgnde && dt < q.bgnde) return false;
-    if (q.endde && dt > q.endde) return false;
-    return true;
-  });
-}
-
-const BROWSER_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-  'Referer': 'https://www.animal.go.kr/',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+const SITE_HEADERS = {
+  'User-Agent': 'GanghwaShelterSite/1.0 (+https://ganghwa-shelter.onrender.com)',
+  'Accept-Language': 'ko-KR,ko;q=0.9',
+  'Accept': 'text/html,image/*;q=0.8,*/*;q=0.5'
 };
+function providerImageUrl(raw) {
+  try {
+    const u = new URL(raw);
+    return /^https?:$/.test(u.protocol) && !u.username && !u.password && !u.port &&
+      (u.hostname === 'animal.go.kr' || u.hostname.endsWith('.animal.go.kr') || u.hostname === 'apis.data.go.kr');
+  } catch (_) { return false; }
+}
 
 function decodeHtmlEntities(s) {
   return String(s || '')
@@ -898,7 +802,7 @@ function filenameOf(url) {
   }
   const lastPart = u.split('/').pop().split('?')[0];
   if (lastPart && lastPart.includes('.')) {
-    return decodeURIComponent(lastPart).toLowerCase();
+    try { return decodeURIComponent(lastPart).toLowerCase(); } catch (_) { return lastPart.toLowerCase(); }
   }
   return u.toLowerCase();
 }
@@ -908,7 +812,7 @@ function dedupeKeepOrder(urls) {
   const seen = new Set();
   for (const raw of urls) {
     const url = sanitizeUrl(raw);
-    if (!url || !/^https?:\/\//i.test(url)) continue;
+    if (!providerImageUrl(url)) continue;
 
     const isShelterFile = /\/files\/shelter\//i.test(url);
     const isImageView = /\/front\/fileMng\/imageView\.do/i.test(url);
@@ -991,130 +895,101 @@ function generateCandidateUrls(rawUrl) {
 }
 
 // ==============================================================
-// 🖼️ 이미지 축소·WebP 변환 + 2단 캐시 (P0-4)
-//    원본(≈430KB)을 그대로 내보내지 않고 용도별 크기로 변환해 전송량을
-//    8~12분의 1로 줄인다. 변환이 오히려 로딩을 늦추지 않도록:
-//      1) 메모리 캐시 → 2) 디스크 캐시 → 3) (최초 1회만) 원본 다운로드+변환
-//      - 동일 변환 요청이 동시에 몰려도 한 번만 처리(단일 비행)
-//      - 원본이 목표 폭보다 작으면 재부호화하지 않고 그대로 전송
-//      - sharp 이 없거나 변환에 실패하면 원본 그대로(기존 동작 보장)
-//      - 첫 화면 카드 이미지는 백그라운드 예열(warmCardImages)
+// 🖼️ 첫 방문과 예열은 같은 원본/리사이즈/단일 비행 경로를 사용한다.
+// 디스크는 URL+폭마다 JPEG 하나. WebP를 받는 브라우저는 메모리 파생본을 사용한다.
 // ==============================================================
 let sharp = null;
 try { sharp = require('sharp'); }
-catch (_) { console.warn('⚠️ sharp 없음 — 이미지 축소·WebP 변환을 생략하고 원본으로 응답합니다'); }
-
-const IMG_CACHE_DIR = path.join(DATA_DIR, 'img-cache');
-try { fs.mkdirSync(IMG_CACHE_DIR, { recursive: true }); } catch (_) { /* 쓰기 불가 환경이면 메모리 캐시만 사용 */ }
-
-const ALLOWED_WIDTHS = new Set([160, 400, 800, 1000]); // 썸네일 / 카드 / 카드(레티나) / 상세
-const IMG_MEM_LIMIT = 128 * 1024 * 1024;               // 메모리 캐시 상한(바이트)
-const IMG_DISK_MAX_FILES = 600;                        // 디스크 캐시 파일 수 상한
-const EXT_OF_TYPE = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' };
-const TYPE_OF_EXT = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
-
-const imgMem = new Map();        // key → { buf, type }
-const imgInflight = new Map();   // key → Promise (동시 요청 합침)
+catch (_) { console.warn('[image] sharp 없음: 리사이즈 없이 원본을 제공합니다.'); }
+const IMG_CACHE_DIR = dataPath('img-cache');
+const ALLOWED_WIDTHS = new Set([160, 400, 800, 1000]);
+const IMG_MEM_LIMIT = 128 * 1024 * 1024;
+const DAY_MS = 24 * 60 * 60_000, IMG_TTL = 7 * DAY_MS;
+const imgMem = new Map(), imgInflight = new Map();
 let imgMemBytes = 0;
-
-function imgKey(rawUrl, w, fmt) {
-  return crypto.createHash('sha1').update(`${rawUrl}|${w}|${fmt}`).digest('hex');
+function imgKey(url, w) { return crypto.createHash('sha1').update(`${url}|${w}`).digest('hex'); }
+function imgDiskPath(key) { return path.join(IMG_CACHE_DIR, `${key}.jpg`); }
+function forgetImage(key) { imgMemBytes -= imgMem.get(key).buf.length; imgMem.delete(key); }
+function imageJob(key, build) {
+  const hit = imgMem.get(key);
+  if (hit && Date.now() - hit.savedAt < IMG_TTL) return Promise.resolve(hit);
+  if (hit) forgetImage(key);
+  if (imgInflight.has(key)) return imgInflight.get(key);
+  const job = Promise.resolve().then(build).then(out => {
+    if (out.buf.length <= IMG_MEM_LIMIT / 8) {
+      imgMem.set(key, out); imgMemBytes += out.buf.length;
+      while (imgMemBytes > IMG_MEM_LIMIT) forgetImage(imgMem.keys().next().value);
+    }
+    return out;
+  }).finally(() => imgInflight.delete(key));
+  imgInflight.set(key, job); return job;
 }
-
-function imgMemSet(key, buf, type) {
-  if (buf.length > IMG_MEM_LIMIT / 8) return; // 지나치게 큰 항목은 메모리에 올리지 않음
-  if (imgMem.has(key)) imgMemBytes -= imgMem.get(key).buf.length;
-  imgMem.set(key, { buf, type });
-  imgMemBytes += buf.length;
-  while (imgMemBytes > IMG_MEM_LIMIT && imgMem.size > 1) {
-    const oldest = imgMem.keys().next().value; // Map은 삽입 순서 유지 → 오래된 것부터 방출
-    imgMemBytes -= imgMem.get(oldest).buf.length;
-    imgMem.delete(oldest);
-  }
-}
-
-function imgDiskPath(key, ext) { return path.join(IMG_CACHE_DIR, `${key}.${ext}`); }
-
 async function imgDiskGet(key) {
-  for (const ext of Object.keys(TYPE_OF_EXT)) {
-    try {
-      const buf = await fs.promises.readFile(imgDiskPath(key, ext));
-      return { buf, type: TYPE_OF_EXT[ext] };
-    } catch (_) { /* 다음 확장자 시도 */ }
-  }
-  return null;
+  try {
+    const file = imgDiskPath(key), st = await fs.promises.stat(file);
+    if (Date.now() - st.mtimeMs >= IMG_TTL) return null;
+    const buf = await fs.promises.readFile(file);
+    if (buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+    return { buf, type: 'image/jpeg', savedAt: st.mtimeMs };
+  } catch (_) { return null; }
 }
-
-// 폭별 변형(160/400/1000)은 캐시 키가 서로 다르다. 이전에는 각 변형이
-// 국가동물보호시스템 원본을 다시 내려받았으므로 썸네일을 본 뒤 메인 사진을
-// 눌러도 같은 원본 다운로드를 한 번 더 기다려야 했다. 원본 자체도 메모리와
-// 디스크에 저장하고, 동시 요청은 imgInflight로 한 번만 수행한다.
+async function imgDiskPut(key, out) {
+  // 포맷을 모르는 데이터를 .jpg라고 기록하지 않는다.
+  if (out.skipDisk || out.type !== 'image/jpeg' || out.buf[0] !== 0xff || out.buf[1] !== 0xd8) return;
+  const file = imgDiskPath(key), tmp = `${file}.${process.pid}.tmp`;
+  try {
+    await fs.promises.mkdir(IMG_CACHE_DIR, { recursive: true });
+    await fs.promises.writeFile(tmp, out.buf); await fs.promises.rename(tmp, file);
+  } catch (_) { await fs.promises.unlink(tmp).catch(() => {}); } // 실패해도 사진은 제공
+}
+let sweeping = false;
+async function sweepImageDisk() {
+  if (sweeping) return;
+  sweeping = true;
+  try {
+    const cutoff = Date.now() - IMG_TTL;
+    for (const entry of await fs.promises.readdir(IMG_CACHE_DIR, {withFileTypes: true})) {
+      if (!entry.isFile() || !/^[0-9a-f]{40}\.(?:jpg|jpeg|png|gif|webp|jpg\.\d+\.tmp)$/.test(entry.name)) continue;
+      const file = path.join(IMG_CACHE_DIR, entry.name);
+      try { if ((await fs.promises.stat(file)).mtimeMs < cutoff) await fs.promises.unlink(file); } catch (_) {}
+    }
+  } catch (_) { /* 빈 캐시/읽기 전용 디스크 */ } finally { sweeping = false; }
+}
 async function getOriginalImage(rawUrl) {
-  const sourceKey = imgKey(rawUrl, 0, 'source');
-  const mem = imgMem.get(sourceKey);
-  if (mem) return mem;
-
-  const running = imgInflight.get(sourceKey);
-  if (running) return running;
-
-  const job = (async () => {
-    const disk = await imgDiskGet(sourceKey);
-    if (disk) {
-      imgMemSet(sourceKey, disk.buf, disk.type);
-      return disk;
+  const key = imgKey(rawUrl, 0);
+  return imageJob(key, async () => {
+    const disk = await imgDiskGet(key);
+    if (disk) return disk;
+    let orig = await fetchOriginalImage(rawUrl);
+    if (!orig) throw new Error('IMAGE_NOT_FOUND');
+    let cleanJPEG = false;
+    if (sharp) {
+      try { orig = { buf: await sharp(orig.buf).rotate().flatten({background:'#fff'}).jpeg({quality:90}).toBuffer(), type:'image/jpeg' }; cleanJPEG=true; }
+      catch (_) { /* 해석 불가 원본은 실제 MIME 그대로 전송한다. */ }
     }
-
-    const original = await fetchOriginalImage(rawUrl);
-    if (!original) throw new Error('IMAGE_NOT_FOUND');
-    imgMemSet(sourceKey, original.buf, original.type);
-
-    const ext = EXT_OF_TYPE[original.type];
-    if (ext) {
-      fs.promises.writeFile(imgDiskPath(sourceKey, ext), original.buf)
-        .then(() => scheduleImgDiskSweep())
-        .catch(() => {});
-    }
-    return original;
-  })().finally(() => imgInflight.delete(sourceKey));
-
-  imgInflight.set(sourceKey, job);
-  return job;
-}
-
-let imgDiskSweepTimer = null;
-function scheduleImgDiskSweep() {
-  if (imgDiskSweepTimer) return;
-  imgDiskSweepTimer = setTimeout(async () => {
-    imgDiskSweepTimer = null;
-    try {
-      const files = await fs.promises.readdir(IMG_CACHE_DIR);
-      if (files.length <= IMG_DISK_MAX_FILES) return;
-      const stats = await Promise.all(files.map((f) =>
-        fs.promises.stat(path.join(IMG_CACHE_DIR, f)).then((st) => ({ f, m: st.mtimeMs })).catch(() => null)
-      ));
-      const sorted = stats.filter(Boolean).sort((a, b) => a.m - b.m);
-      const removeCount = sorted.length - Math.floor(IMG_DISK_MAX_FILES * 0.8);
-      await Promise.all(sorted.slice(0, removeCount).map((x) =>
-        fs.promises.unlink(path.join(IMG_CACHE_DIR, x.f)).catch(() => {})
-      ));
-    } catch (_) { /* 정리 실패는 무시 */ }
-  }, 10000);
-  if (imgDiskSweepTimer.unref) imgDiskSweepTimer.unref();
+    const out = { ...orig, savedAt: Date.now(), skipDisk: !cleanJPEG };
+    // 재인코딩으로 EXIF/GPS를 없앤 JPEG만 디스크에 저장한다.
+    await imgDiskPut(key, out); return out;
+  });
 }
 
 // 원본 이미지 다운로드 — 기존 후보 URL 로직을 그대로 재사용하고,
 // Content-Type 에 붙어 오는 charset 같은 부착 정보는 뗀다(P2)
 async function fetchOriginalImage(imageUrl) {
-  for (const targetUrl of generateCandidateUrls(imageUrl)) {
+  for (const targetUrl of generateCandidateUrls(imageUrl).filter(providerImageUrl)) {
     try {
       const response = await axios.get(targetUrl, {
         responseType: 'arraybuffer',
         timeout: 10000,
-        maxRedirects: 7,
+        maxRedirects: 3,
+        beforeRedirect(opts) {
+          if (!providerImageUrl(`${opts.protocol}//${opts.hostname}${opts.port ? ':' + opts.port : ''}/`)) throw new Error('이미지 호스트 오류');
+        },
+        maxContentLength: 20 * 1024 * 1024,
         httpsAgent,
         httpAgent,
         headers: {
-          ...BROWSER_HEADERS,
+          ...SITE_HEADERS,
           Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
         },
         validateStatus: (s) => s >= 200 && s < 400
@@ -1132,98 +1007,44 @@ async function fetchOriginalImage(imageUrl) {
         else continue;
       }
       return { buf: Buffer.from(buf), type: contentType };
-    } catch {
+    } catch (err) {
+      if ([401,403,429].includes(err.response?.status)) break; // 차단/속도 제한은 다른 후보로 재시도하지 않는다.
       continue;
     }
   }
   return null;
 }
 
-// (원본URL, 가로폭, webp 여부) → { buf, type, etag }. 캐시 조회·단일 비행 포함.
-async function getImageVariant(rawUrl, w, wantsWebp) {
-  const canResize = !!(sharp && w && ALLOWED_WIDTHS.has(w));
-  const fmt = canResize ? (wantsWebp ? 'webp' : 'jpeg') : 'orig';
-  const key = imgKey(rawUrl, canResize ? w : 0, fmt);
-
-  const mem = imgMem.get(key);
-  if (mem) return { ...mem, etag: key };
-
-  const running = imgInflight.get(key);
-  if (running) return running;
-
-  const job = (async () => {
+// 카드 예열과 프록시 모두 이 함수로 진입한다. 같은 폭을 동시에 처리하지 않는다.
+async function getImageVariant(rawUrl, width, wantsWebp = false) {
+  if (!providerImageUrl(rawUrl)) throw new Error('IMAGE_HOST');
+  const w = ALLOWED_WIDTHS.has(width) ? width : 0, key = imgKey(rawUrl, w);
+  const base = w === 0 ? await getOriginalImage(rawUrl) : await imageJob(key, async () => {
     const disk = await imgDiskGet(key);
-    if (disk) {
-      imgMemSet(key, disk.buf, disk.type);
-      return { ...disk, etag: key };
-    }
-
+    if (disk) return disk;
     const orig = await getOriginalImage(rawUrl);
-
+    if (!sharp) return orig; // 원본을 '축소 성공'으로 디스크에 저장하지 않는다.
     let out = orig;
-    if (canResize && (orig.type === 'image/jpeg' || orig.type === 'image/png' || orig.type === 'image/webp')) {
-      try {
-        const meta = await sharp(orig.buf).metadata();
-        if (meta.width && meta.width > w) {
-          let pipeline = sharp(orig.buf).rotate(); // 휴대폰 사진 방향(EXIF) 자동 보정
-          pipeline = pipeline.resize({ width: w, withoutEnlargement: true });
-          const buf = wantsWebp
-            ? await pipeline.webp({ quality: 78 }).toBuffer()
-            : await pipeline.jpeg({ quality: 80, mozjpeg: true }).toBuffer();
-          out = { buf, type: wantsWebp ? 'image/webp' : 'image/jpeg' };
-        }
-        // 원본이 목표 폭보다 작으면 재부호화하지 않고 그대로(품질·속도 보존)
-      } catch (_) {
-        out = orig; // 변환 실패 시 원본 폴백 — 이미지가 안 뜨는 상황을 만들지 않는다
+    try {
+      const meta = await sharp(orig.buf).metadata();
+      if (!meta.width) return orig;
+      if (meta.width > w || orig.type !== 'image/jpeg') {
+        const buf = await sharp(orig.buf).rotate().resize({width:w, withoutEnlargement:true})
+          .flatten({background:'#fff'}).jpeg({quality:80, mozjpeg:true}).toBuffer();
+        out = { buf, type:'image/jpeg', savedAt: Date.now() };
       }
-    }
-
-    imgMemSet(key, out.buf, out.type);
-    const ext = EXT_OF_TYPE[out.type];
-    if (ext) {
-      fs.promises.writeFile(imgDiskPath(key, ext), out.buf)
-        .then(() => scheduleImgDiskSweep())
-        .catch(() => { /* 디스크 캐시 실패는 응답에 지장 없음 */ });
-    }
-    return { ...out, etag: key };
-  })().finally(() => imgInflight.delete(key));
-
-  imgInflight.set(key, job);
-  return job;
-}
-
-// 첫 화면 카드 이미지(w=400)를 백그라운드에서 미리 변환해 둔다.
-// 이용자가 도착할 때쯤엔 캐시가 완성돼 있어 "변환 때문에 늦어지는" 첫 장면이 없다.
-let lastImgWarmAt = 0;
-function warmCardImages(items) {
-  if (!sharp || !Array.isArray(items) || !items.length) return;
-  if (Date.now() - lastImgWarmAt < 5 * 60 * 1000) return; // 5분 내 재예열 방지
-  lastImgWarmAt = Date.now();
-  const urls = items
-    .slice(0, 12)
-    .map((it) => String(it.popfile1 || ''))
-    .filter((u) => /^https?:\/\//i.test(u));
-  if (!urls.length) return;
-  console.log(`🖼️ 카드 이미지 예열 시작 (${urls.length}장, w=400 webp)`);
-  (async () => {
-    for (let i = 0; i < urls.length; i += 3) { // 업스트림 동시 3개로 순한 예열
-      await Promise.all(urls.slice(i, i + 3).map((u) => getImageVariant(u, 400, true).catch(() => {})));
-    }
-    console.log('🖼️ 카드 이미지 예열 완료');
-  })();
-}
-
-// 상세 URL을 찾은 직후 160px 썸네일 생성을 시작한다. 응답은 기다리지 않고
-// 즉시 보내며, 브라우저 요청이 뒤따르면 getImageVariant의 단일 비행에 합류한다.
-function warmDetailImages(urls) {
-  if (!sharp || !Array.isArray(urls) || !urls.length) return;
-  (async () => {
-    for (let i = 0; i < urls.length; i += 4) {
-      await Promise.all(urls.slice(i, i + 4).map((url) =>
-        getImageVariant(url, 160, true).catch(() => {})
-      ));
-    }
-  })();
+    } catch (_) { return orig; }
+    await imgDiskPut(key, out); return out;
+  });
+  if (sharp && w && wantsWebp && base.type === 'image/jpeg') {
+    const webKey = key + '-webp';
+    try {
+      const web = await imageJob(webKey, async () => ({ buf: await sharp(base.buf).webp({quality:78}).toBuffer(),
+        type:'image/webp', savedAt:base.savedAt }));
+      return { ...web, etag:webKey };
+    } catch (_) { /* JPEG 폴백 */ }
+  }
+  return { ...base, etag:key };
 }
 
 app.get('/api/image-proxy', async (req, res) => {
@@ -1231,7 +1052,8 @@ app.get('/api/image-proxy', async (req, res) => {
   if (!imageUrl || imageUrl === 'undefined') return res.status(400).send('URL 오류');
 
   // 로컬 정적 이미지(데모 등)는 해당 파일로 바로 안내
-  if (typeof imageUrl === 'string' && imageUrl.startsWith('/')) return res.redirect(imageUrl);
+  if (typeof imageUrl === 'string' && /^\/(?:img|uploads)\/[\w./%-]+$/.test(imageUrl)) return res.redirect(imageUrl);
+  if (!providerImageUrl(imageUrl)) return res.status(400).send('동물 사진 주소가 아닙니다.');
 
   const w = parseInt(req.query.w, 10) || 0;
   const wantsWebp = /\bimage\/webp\b/i.test(String(req.headers.accept || ''));
@@ -1252,55 +1074,25 @@ app.get('/api/image-proxy', async (req, res) => {
 });
 
 // ==============================================================
-// 🕷️ 크롤러 (GET/POST 다중 수집 및 f_id 자동 추적)
+// 🕷️ 공고 중 대상만 백그라운드에서 공개 상세 페이지를 읽는다.
+// 주소나 파일 번호를 추측하지 않고 HTML에 명시된 사진만 사용한다.
 // ==============================================================
 async function fetchDetailHtml(desertionNo) {
-  const id = encodeURIComponent(String(desertionNo));
-  const gets = [
-    `https://www.animal.go.kr/front/awtis/public/publicDtl.do?desertionNo=${id}&fileListCnt=50&pageSize=50`,
-    `https://www.animal.go.kr/front/awtis/public/publicDtl.do?desertionNo=${id}`,
-    `https://www.animal.go.kr/front/awtis/protection/protectionDtl.do?desertionNo=${id}`
-  ];
-  const body = new URLSearchParams({
-    desertionNo: String(desertionNo),
-    fileListCnt: '50',
-    pageSize: '50'
+  const detailRequest = url => axios.get(url, {
+    params: {desertionNo, fileListCnt:50, pageSize:50}, timeout:8000, signal:AbortSignal.timeout(8000),
+    maxRedirects:0, maxContentLength:3 * 1024 * 1024, httpsAgent, headers:SITE_HEADERS, responseType:'text'
   });
-
-  // 과거에는 GET 3회와 POST 1회를 차례로 기다려 최악의 경우 40초가 걸렸다.
-  // 서로 독립적인 폴백 요청이므로 병렬 실행하고 성공한 HTML만 순서대로 합친다.
-  const requests = [
-    ...gets.map((url) => axios.get(url, {
-      timeout: 8000,
-      httpsAgent,
-      httpAgent,
-      headers: BROWSER_HEADERS,
-      responseType: 'text',
-      decompress: true
-    })),
-    axios.post(
-      'https://www.animal.go.kr/front/awtis/public/publicDtl.do',
-      body.toString(),
-      {
-        timeout: 8000,
-        httpsAgent,
-        httpAgent,
-        headers: {
-          ...BROWSER_HEADERS,
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        responseType: 'text'
-      }
-    )
-  ];
-
-  const settled = await Promise.allSettled(requests);
-  const chunks = settled
-    .filter((result) => result.status === 'fulfilled')
-    .map((result) => String(result.value?.data || ''))
-    .filter((html) => html.length > 400);
-
-  return decodeHtmlEntities(chunks.join('\n'));
+  let response;
+  try { response = await detailRequest('https://www.animal.go.kr/front/awtis/public/publicDtl.do'); }
+  catch (err) {
+    // 기존 보호 상세 경로는 공개 공고 페이지가 없을 때만 사용한다. 차단·속도 제한은 재시도하지 않는다.
+    if (![404,410].includes(err.response?.status)) throw err;
+    await new Promise(resolve => setTimeout(resolve, CRAWL_DELAY_MS));
+    response = await detailRequest('https://www.animal.go.kr/front/awtis/protection/protectionDtl.do');
+  }
+  const html = String(response.data || '');
+  if (!/<(?:html|body|img)\b/i.test(html)) throw new Error('상세 페이지 없음');
+  return decodeHtmlEntities(html);
 }
 
 function extractShelterPathsFromHtml(html) {
@@ -1317,138 +1109,23 @@ function extractShelterPathsFromHtml(html) {
   return dedupeKeepOrder(found);
 }
 
-function extractFIdAndSeqs(html) {
-  let fId = null;
-  const seqs = new Set();
-
-  const patterns = [
-    /f_id\s*=\s*["']?(\d+)/i,
-    /fileId\s*=\s*["']?(\d+)/i,
-    /atchFileId\s*=\s*["']?(\d+)/i,
-    /fn_fileDownload\s*\(\s*["']?(\d+)/i,
-    /f_id["']?\s*:\s*["']?(\d+)/i,
-    /f_id=(\d+)/i,
-    /f_id_(\d+)/i
-  ];
-
-  for (const p of patterns) {
-    const m = html.match(p);
-    if (m && m[1] && m[1].length >= 5) {
-      fId = m[1];
-      break;
-    }
+// T8의 HTML 추출기를 사용하되, 페이지 전체에서 서로 다른 파일의 ID와 순번을 짝짓지 않는다.
+// 실제 공개된 링크 또는 같은 다운로드 호출에 명시된 (파일 ID, 순번) 쌍만 수집한다.
+async function crawlDetailImages(no) {
+  if (DEMO) return MOCK_EXTRA_IMAGES[no] || [];
+  const html = await fetchDetailHtml(no);
+  const paths = extractShelterPathsFromHtml(html);
+  const pairs = /\bfn_fileDownload\s*\(\s*["']?(\d{5,24})["']?\s*,\s*["']?(\d{1,3})["']?\s*[,)]/gi;
+  for (const [,id,seq] of html.matchAll(pairs)) {
+    paths.push(`https://www.animal.go.kr/query.do?pid=desertion_shelter&cmd=fileDownload&f_id=${id}&f_seq=${seq}`);
   }
-
-  const seqRe = /f_seq\s*=\s*["']?(\d+)/gi;
-  let sm;
-  while ((sm = seqRe.exec(html)) !== null) {
-    seqs.add(Number(sm[1]));
-  }
-
-  return { fId, seqs: [...seqs].filter(n => n > 0 && n < 50) };
+  return dedupeKeepOrder(paths).slice(0,16);
 }
-
-async function probeFileSequences(fId) {
-  if (!fId) return [];
-  const foundUrls = [];
-  const seqList = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
-
-  const tasks = seqList.map(async (seq) => {
-    const downloadUrl = `https://www.animal.go.kr/query.do?pid=desertion_shelter&cmd=fileDownload&f_id=${fId}&f_seq=${seq}`;
-    try {
-      const response = await axios.get(downloadUrl, {
-        timeout: 5000,
-        maxRedirects: 5,
-        responseType: 'arraybuffer',
-        httpsAgent,
-        httpAgent,
-        headers: BROWSER_HEADERS,
-        validateStatus: (s) => s >= 200 && s < 400
-      });
-
-      const finalUrl = response.request?.res?.responseUrl || response.request?.responseURL || '';
-      if (finalUrl && /\/files\/shelter\//i.test(finalUrl)) {
-        return sanitizeUrl(finalUrl).split('?')[0];
-      }
-
-      const buf = response.data;
-      if (buf && buf.length > 300) {
-        const b0 = buf[0], b1 = buf[1];
-        if ((b0 === 0xff && b1 === 0xd8) || (b0 === 0x89 && b1 === 0x50)) {
-          return downloadUrl;
-        }
-      }
-    } catch (_) {}
-    return null;
-  });
-
-  const results = await Promise.all(tasks);
-  results.forEach(u => { if (u) foundUrls.push(u); });
-  return dedupeKeepOrder(foundUrls);
-}
-
-app.get('/api/detail-images', async (req, res) => {
-  const desertionNo = String(req.query.desertionNo || '').trim();
-  if (!desertionNo) return res.status(400).json({ error: 'desertionNo 필요', images: [], count: 0 });
-
-  // 🧪 데모 모드
-  if (!process.env.API_KEY) {
-    const images = MOCK_EXTRA_IMAGES[desertionNo] || [];
-    return res.json({ images, fromCache: true, count: images.length, filenames: images.map(filenameOf) });
-  }
-
-  if (req.query.refresh === '1' || req.query.refresh === 'true') {
-    detailImageCache.delete(desertionNo);
-  }
-
-  const cached = detailImageCache.get(desertionNo);
-  if (cached && Date.now() - cached.timestamp < DETAIL_CACHE_TTL) {
-    warmDetailImages(cached.images);
-    return res.json({
-      images: cached.images,
-      fromCache: true,
-      count: cached.images.length,
-      filenames: cached.images.map(filenameOf)
-    });
-  }
-
-  try {
-    const html = await fetchDetailHtml(desertionNo);
-    if (!html) return res.json({ images: [], error: '상세페이지 접근 실패', count: 0 });
-
-    const fromHtml = extractShelterPathsFromHtml(html);
-    const { fId, seqs } = extractFIdAndSeqs(html);
-    const fromKnownSequences = fId
-      ? seqs.map((seq) => `https://www.animal.go.kr/query.do?pid=desertion_shelter&cmd=fileDownload&f_id=${fId}&f_seq=${seq}`)
-      : [];
-
-    let merged = dedupeKeepOrder([...fromHtml, ...fromKnownSequences]).slice(0, 16);
-
-    // HTML에 파일 경로나 명시적인 f_seq가 없을 때만 12개 번호를 탐색한다.
-    // 이미 사진 목록을 확보했는데도 최대 5초의 probe를 항상 기다리던 병목을 제거한다.
-    if (fId && merged.length <= 1) {
-      const fromProbing = await probeFileSequences(fId);
-      merged = dedupeKeepOrder([...merged, ...fromProbing]).slice(0, 16);
-    }
-
-    detailImageCache.set(desertionNo, { timestamp: Date.now(), images: merged });
-    warmDetailImages(merged);
-
-    console.log(
-      `🕷️ [크롤링] desertionNo=${desertionNo} → 총 ${merged.length}장 수집 성공 | ` +
-      `f_id=${fId || '-'} | files=${merged.map(filenameOf).join(', ')}`
-    );
-
-    res.json({
-      images: merged,
-      fromCache: false,
-      count: merged.length,
-      filenames: merged.map(filenameOf)
-    });
-  } catch (error) {
-    console.error(`❌ 크롤링 실패 (${desertionNo}):`, error.message);
-    res.json({ images: [], error: error.message, count: 0 });
-  }
+app.get('/api/detail-images', (req, res) => {
+  const no = String(req.query.desertionNo || '').trim();
+  if (!no) return res.status(400).json({ error:'desertionNo 필요', images:[] });
+  const images = animalSync.getImages(no); // refresh 무시. 크롤링·원본 예열도 하지 않는다.
+  res.set('Cache-Control','no-store').json({images, count:images.length, fromCache:true, filenames:images.map(filenameOf)});
 });
 
 // ==============================================================
@@ -1457,40 +1134,33 @@ app.get('/api/detail-images', async (req, res) => {
 async function fetchGanghwaAnimalsFromApi(queryParams) {
   const ganghwaParams = await getGanghwaParams();
   const baseParams = { ...ganghwaParams, ...queryParams, numOfRows: '50' };
-  const firstPageData = await fetchOpenApi('abandonmentPublic_v2', { ...baseParams, pageNo: '1' });
-  const body = firstPageData?.response?.body;
-  if (!body?.items?.item) return [];
-
-  const totalCount = parseInt(body.totalCount) || 0;
-  let allItems = Array.isArray(body.items.item) ? body.items.item : [body.items.item];
-  const totalPages = Math.min(Math.ceil(totalCount / 50), 20);
-
-  if (totalPages > 1) {
-    // 페이지 하나가 실패해도 목록이 잘리지 않도록 재시도 3회
-    const fetchPageWithRetry = async (pageNo) => {
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          return await fetchOpenApi('abandonmentPublic_v2', { ...baseParams, pageNo: String(pageNo) });
-        } catch (e) {
-          console.warn(`⚠️ ${pageNo}페이지 조회 실패 (시도 ${attempt}/3):`, e.message);
-          if (attempt === 3) return null;
-          await new Promise((r) => setTimeout(r, 400 * attempt));
-        }
+  async function fetchPage(pageNo) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const data = await fetchOpenApi('abandonmentPublic_v2', {...baseParams, pageNo:String(pageNo)});
+        const body = data?.response?.body;
+        const code = data?.response?.header?.resultCode;
+        if (!body || (code != null && !/^0+$/.test(String(code)))) throw new Error('API 오류');
+        const count = Number(body.totalCount);
+        if (body.totalCount == null || !Number.isSafeInteger(count) || count < 0) throw new Error('totalCount 누락');
+        const row = body.items?.item;
+        const rows = Array.isArray(row) ? row : row ? [row] : [];
+        if (rows.length !== Math.min(50, Math.max(0, count - (pageNo - 1) * 50))) throw new Error('페이지 일부 누락');
+        return { count, rows };
+      } catch (e) {
+        if (attempt >= 3) throw e;
+        await new Promise(resolve => setTimeout(resolve, 400 * attempt));
       }
-    };
-    const pagesResults = await Promise.all(
-      Array.from({ length: totalPages - 1 }, (_, i) => fetchPageWithRetry(i + 2))
-    );
-    pagesResults.forEach((data) => {
-      if (data?.response?.body?.items?.item) {
-        const items = data.response.body.items.item;
-        allItems = allItems.concat(Array.isArray(items) ? items : [items]);
-      }
-    });
-    if (allItems.length < totalCount) {
-      console.warn(`⚠️ 전체 ${totalCount}건 중 ${allItems.length}건만 수집됨 — 일부 누락 가능. 잠시 후 새로고침 필요`);
     }
   }
+  const first = await fetchPage(1), allItems = [...first.rows];
+  // 20페이지 상한을 없애고 순서대로 받는다. 일부 페이지 실패 시 전체를 폐기한다.
+  for (let p = 2; p <= Math.ceil(first.count / 50); p++) {
+    const page = await fetchPage(p);
+    if (page.count !== first.count) throw new Error('조회 중 전체 건수 변경');
+    allItems.push(...page.rows);
+  }
+  if (new Set(allItems.map(animalKeyOf)).size !== first.count) throw new Error('페이지 간 중복/누락');
 
   let filtered = allItems.filter((a) => {
     const careNm = a.careNm || '';
@@ -1512,63 +1182,36 @@ async function fetchGanghwaAnimalsFromApi(queryParams) {
   return filtered;
 }
 
-app.get('/api/animals', async (req, res) => {
+// 운영에서 키가 빠졌을 때 데모 데이터로 실제 스냅샷을 덮어쓰지 않는다.
+const DEMO = !process.env.API_KEY && process.env.NODE_ENV !== 'production' && !process.env.RENDER;
+const animalSync = createAnimalSync({
+  snapshotFile:dataPath(DEMO ? 'animals-snapshot.demo.json' : 'animals-snapshot.json'),
+  fetchAllAnimalsFromApi:q => DEMO ? filterAnimals(MOCK_ANIMALS, q) : fetchGanghwaAnimalsFromApi(q),
+  crawlDetailImages, shareIdOf, shortCodeOf, getResizedImage:(url, w) => getImageVariant(url, w, true)
+});
+app.get('/api/animals', async (req, res, next) => {
   try {
-    const { bgnde, endde, upkind, refresh } = req.query;
-    const queryParams = {};
-    if (bgnde) queryParams.bgnde = String(bgnde).replace(/\D/g, '');
-    if (endde) queryParams.endde = String(endde).replace(/\D/g, '');
-    if (upkind) queryParams.upkind = upkind;
-
-    // 날짜 미지정 시(관리자 페이지 등): 최근 3년 전체 조회로 기본값을 채워 누락 방지
-    if (!queryParams.bgnde || !queryParams.endde) {
-      const ymd = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-      const now = new Date();
-      if (!queryParams.endde) queryParams.endde = ymd(now);
-      if (!queryParams.bgnde) queryParams.bgnde = ymd(new Date(now.getFullYear() - 3, now.getMonth(), now.getDate()));
-    }
-
-    const cacheKey = JSON.stringify(queryParams);
-    const forceRefresh = refresh === '1' || refresh === 'true';
-    if (forceRefresh) {
-      animalCache.delete(cacheKey);
-      // ⚠️ detailImageCache(사진 크롤링 캐시)는 비우지 않는다 —
-      //    목록 새로고침 한 번으로 전 개체가 재크롤링되면 이용자의 사진이
-      //    늦어진다. 사진 캐시는 30분 TTL과 /api/detail-images?refresh=1 로만 갱신.
-      console.log('🗑️ 목록 캐시 초기화');
-    }
-
-    // 🧪 데모 모드: API_KEY가 없으면 샘플 데이터 + 로컬 케어 데이터로 응답
-    if (!process.env.API_KEY) {
-      const mockItems = mockFilterItems(queryParams).map(enrichItem);
-      console.log(`🧪 [데모] 보호중 ${mockItems.length}마리 (조회기간 ${queryParams.bgnde} ~ ${queryParams.endde})`);
-      return res.json({ total: mockItems.length, items: mockItems, fromCache: false, mock: true });
-    }
-
-    const cachedData = animalCache.get(cacheKey);
-    if (!forceRefresh && cachedData && Date.now() - cachedData.timestamp < CACHE_TTL) {
-      return res.json({ total: cachedData.items.length, items: cachedData.items.map(enrichItem), fromCache: true });
-    }
-
-    const items = (await fetchGanghwaAnimalsFromApi(queryParams)).map(enrichItem);
-    animalCache.set(cacheKey, { timestamp: Date.now(), items });
-    warmCardImages(items); // 새 목록이 오면 첫 화면 카드 사진도 미리 준비 (P0-4)
-    console.log(`✨ [조회] 보호중 ${items.length}마리`);
-    res.json({ total: items.length, items, fromCache: false });
-  } catch (error) {
-    console.error(error.message);
-    res.status(500).json({ error: error.message, total: 0, items: [] });
-  }
+    if (!getAllAnimals().length) await animalSync.refreshForRead();
+    if (!getAllAnimals().length) return res.status(503).set('Cache-Control','no-store')
+      .json({error:'목록을 준비하고 있습니다. 잠시 후 다시 확인해 주세요.', items:[], total:0});
+    const items = filterAnimals(getAllAnimals(), req.query).map(enrichItem);
+    res.set('Cache-Control','public, max-age=60').json({total:items.length, items, fromCache:true,
+      syncedAt:animalSync.getStatus().syncedAt, ...(DEMO ? {mock:true} : {})});
+  } catch (e) { next(e); }
 });
-
-app.post('/api/cache/clear', (req, res) => {
-  animalCache.clear();
-  detailImageCache.clear();
-  res.json({ ok: true });
+app.get('/api/admin/sync', requireAdmin, (_req, res) => {
+  res.set('Cache-Control','no-store').json(animalSync.getStatus());
 });
+app.post('/api/admin/sync', requireAdmin, async (_req, res) => {
+  const ok = await animalSync.runSync();
+  res.set('Cache-Control','no-store').status(ok ? 200 : 503).json({ok, ...animalSync.getStatus(),
+    ...(!ok ? {error:'전체 목록을 받지 못해 기존 스냅샷을 유지했습니다.'} : {})});
+});
+// 기존 주소 호환: 공개 요청으로 스냅샷을 지우거나 외부 동기화를 유발하지 않는다.
+app.post('/api/cache/clear', (_req, res) => res.json({ok:true, cleared:false}));
 
 // HTML·공유 페이지·API·서비스워커 경로를 모두 처리한 뒤 정적 파일을 제공한다.
-app.use(express.static(PUBLIC_DIR, {
+const staticOptions = {
   index: false,
   setHeaders(res, filePath) {
     if (/\.(?:js|css|svg|png|jpe?g|webp|woff2?|ico|webmanifest)$/i.test(filePath)) {
@@ -1578,15 +1221,23 @@ app.use(express.static(PUBLIC_DIR, {
         : 'no-cache');
     }
   }
-}));
+};
+// 정적 루트가 저장소 자체이므로 공개 폴더와 자산만 마운트한다. services/lib/data는 비공개.
+for (const dir of ['css','js','img','uploads']) {
+  app.use('/'+dir, express.static(path.join(PUBLIC_DIR, dir), staticOptions));
+}
+app.get(['/logo.svg','/favicon.ico','/favicon.png','/apple-touch-icon.png','/icon-192.png',
+  '/icon-512.png','/manifest.webmanifest'], express.static(PUBLIC_DIR, staticOptions));
 
-app.listen(PORT, async () => {
+animalSync.start(); // 디스크 목록을 먼저 읽고, API 동기화는 listen을 막지 않는다.
+sweepImageDisk(); setInterval(sweepImageDisk, DAY_MS).unref();
+const httpServer=app.listen(PORT, () => {
   console.log(`🐾 강화군 동물보호센터 서버 포트 ${PORT} 실행중`);
-  try {
-    await getGanghwaParams();
-    const items = await fetchGanghwaAnimalsFromApi({});
-    animalCache.set(JSON.stringify({}), { timestamp: Date.now(), items });
-    console.log(`🚀 예열 ${items.length}마리 완료`);
-    warmCardImages(items); // 깨어난 직후 첫 화면 사진부터 백그라운드 준비 (P0-4)
-  } catch (e) {}
+});
+
+// Render 정상 종료 신호: 개인 이벤트가 아닌 누적 카운터를 마지막으로 반영한다.
+process.once('SIGTERM', () => {
+  dailyCounters.flush();
+  httpServer.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2500).unref();
 });
