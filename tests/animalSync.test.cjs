@@ -73,3 +73,43 @@ test('목록 공개 직후 QR 누락: 두 요청이 새 목록 1회를 공유하
  try {assert.equal(await a,true);assert.equal(f.api,2);assert.equal(s.findByShareId('3').desertionNo,'3');assert.equal(s.getStatus().running,true);}finally{secondDone();}
  assert.equal(await all,true);assert.deepEqual(seen,['1','2']);
 });
+
+test('예열은 목록/동기화를 막지 않고 대표 24×400 완료 뒤 상단 8×160만 직렬 처리', {timeout:4000},async t=>{
+  let start, resume, finish, active=0, peak=0;const calls=[];
+  const entered=new Promise(r=>start=r), gate=new Promise(r=>resume=r), completed=new Promise(r=>finish=r);
+  t.after(resume);
+  const {s,f}=await fixture(t,{getResizedImage:async(url,w)=>{
+    active++;peak=Math.max(peak,active);calls.push([url,w]);
+    try {
+      if(calls.length===1){start();await gate;}
+      await new Promise(setImmediate);
+      if(url.endsWith('next-3.jpg'))throw Error('fixture: unavailable thumbnail');
+    }finally {active--;if(url.endsWith('next-8.jpg'))finish();}
+  }});
+  const next=n=>`https://www.animal.go.kr/files/shelter/next-${n}.jpg`;
+  f.rows=Array.from({length:27},(_,i)=>make(i+1,{noticeEdt:'20261117',popfile2:next(i+1)}));
+  const full=s.runSync(),list=s.runSync({listOnly:true});await entered;assert.equal(await list,true);assert.equal(await full,true);
+  assert.equal(s.getSnapshot().items.length,27);assert.equal(calls.length,1);resume();await completed;
+  assert.deepEqual(calls,[...f.rows.slice(0,24).map(a=>[a.popfile1,400]),...f.rows.slice(0,8).map(a=>[a.popfile2,160])]);
+  assert.equal(peak,1);assert.deepEqual(f.collect,[]);assert.equal(f.api,1);
+});
+test('두 번째 표시 가능한 API 필드만 예열: 빈 칸/한 장/로컬/중복 처리, 9번째 개체로 보충하지 않음',async t=>{
+  const {s,f}=await fixture(t);const second='https://www.animal.go.kr/files/shelter/another.jpg';
+  f.rows=Array.from({length:9},(_,i)=>make(i+1,{noticeEdt:'20261117'}));
+  f.rows[0].popfile7=second; // 2번 필드가 비어 있어도 화면의 두 번째 사진
+  f.rows[1].popfile2='/img/local.jpg';f.rows[2].popfile2=f.rows[2].popfile1;
+  f.rows[3].popfile2=second; // 같은 160px을 한 배치에서 두 번 호출하지 않는다.
+  f.rows[4].popfile2='invalid';f.rows[4].popfile5='https://www.animal.go.kr/files/shelter/later.jpg';
+  f.rows[5].popfile2='https://unrelated.example/no.jpg';f.rows[7].popfile8=f.rows[7].popfile1;delete f.rows[7].popfile1;
+  f.rows[8].popfile2='https://www.animal.go.kr/files/shelter/outside.jpg';
+  await s.runSync();await new Promise(setImmediate);
+  assert.deepEqual(f.warm.filter(([,w])=>w===160),[[second,160],[f.rows[4].popfile5,160]]);assert.deepEqual(f.collect,[]);
+});
+
+test('API 1장 + 저장된 추가 사진: 첫 사진 중복을 제외한 화면의 두 번째 주소 예열, 새 상세 호출 0회',async t=>{
+  const first='https://openapi.animal.go.kr/openapi/service/rest/fileDownloadSrvc/files/shelter/a.jpg';
+  const duplicate='https://www.animal.go.kr/files/shelter/a.jpg',extra='https://www.animal.go.kr/files/shelter/b.jpg';
+  const {s,f,file}=await fixture(t);f.rows=[make(1,{popfile1:first})];
+  await fs.writeFile(file,JSON.stringify({items:f.rows,syncedAt:new Date(t0).toISOString(),extra:{'1':{images:[duplicate,extra],updTm:'v1',crawledAt:new Date(t0).toISOString()}}}));
+  s.loadFromDisk();await s.runSync();assert.deepEqual(f.warm,[[first,400],[extra,160]]);assert.deepEqual(f.collect,[]);
+});

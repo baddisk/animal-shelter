@@ -71,6 +71,16 @@ function persistedItem(item) {
   for (const k of ['popfile',...Array.from({length:8},(_,i)=>'popfile'+(i+1))]) {const u=cachePhoto(item[k]);if(u)out[k]=u;}
   return out;
 }
+// 화면의 getFilenameFromUrl과 같은 식별자. API 원본과 이미 저장된 추가 사진을 합칠 때만 사용한다.
+function galleryKey(url) {
+  if (/f_seq=|f_id=/i.test(url)) {
+    const id = (url.match(/f_id=(\d+)/i) || [])[1] || '';
+    const seq = (url.match(/f_seq=(\d+)/i) || [])[1] || '';
+    return `fid${id}_seq${seq}`;
+  }
+  const leaf = url.split('/').pop().split('?')[0];
+  try { return decodeURIComponent(leaf).toLowerCase(); } catch (_) { return leaf.toLowerCase(); }
+}
 function filterAnimals(items, q = {}) {
   const from = date8(q.bgnde), to = date8(q.endde), kind = String(q.upkind || '');
   return items.filter(a => {
@@ -144,11 +154,32 @@ function createAnimalSync({ fetchAllAnimalsFromApi, crawlDetailImages, getResize
     const a = byNo.get(String(no));
     return a && needsCrawl(a, kstToday(now())) ? (snap.extra[no]?.images || []) : [];
   }
+  // 목록 응답과 독립된 기존 예열 작업 하나에서 두 단계를 순서대로 처리한다.
   async function prewarmThumbnails(list) {
     for (const a of list.slice(0, 24)) {
       const photo=Array.from({length:8}, (_,i)=>a['popfile'+(i+1)]).find(Boolean);
       if (!/^https?:\/\//i.test(photo || '')) continue; // 로컬 정적 파일은 프록시가 필요 없다.
       try { await getResizedImage(photo, 400); } catch (_) { /* 다음 사진 */ }
+    }
+    // 화면상 두 번째 사진을 선택한다. API 사진이 모자라면 이미 저장된 추가 주소만 읽는다.
+    const seen = new Set();
+    for (const a of list.slice(0, 8)) {
+      const photos = Array.from({ length: 8 }, (_, i) => a['popfile' + (i + 1)])
+        .filter(v => typeof v === 'string' && (/^https?:\/\//i.test(v) || v.startsWith('/')));
+      if (photos.length < 2 && byNo.get(noOf(a)) === a) {
+        const keys = new Set(photos.map(galleryKey));
+        for (const extra of getImages(noOf(a))) { // 메모리 조회, 크롤러를 호출하지 않는다.
+          const key = galleryKey(extra);
+          if (!key || keys.has(key)) continue;
+          keys.add(key); photos.push(extra);
+          if (photos.length === 2) break;
+        }
+      }
+      const [first, second] = photos;
+      if (!second || second === first || !/^https?:\/\//i.test(second) || !cachePhoto(second) || seen.has(second)) continue;
+      seen.add(second);
+      // 기존 URL+폭 캐시/진행 중 요청을 그대로 재사용. 실패해도 다른 개체는 계속 진행.
+      try { await getResizedImage(second, 160); } catch (_) { /* 다음 사진 */ }
     }
   }
   async function publishList() {

@@ -29,6 +29,7 @@ let swipeLocked = null;
 // 갤러리 전환 상태. 선택 즉시 작은 미리보기를 표시하고, 큰 이미지는
 // 백그라운드에서 디코딩한 뒤 같은 <img>에 교체한다.
 let modalImageLoadToken = 0;
+let modalQualityFrame = 0;
 let isModalGalleryLoading = false;
 const modalFullImageLoads = new Map(); // url → Promise (브라우저 중복 다운로드 방지)
 const extraImagesInflight = new Map();
@@ -211,6 +212,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // 뒤로가기/앞으로가기 — 상세가 열려 있으면 닫고, 히스토리 안에서
   // 다른 개체 상세로 이동했으면 그 개체를 보여준다 (P0-3)
   window.addEventListener('popstate', handlePopState);
+  // 카드 사진으로 시작한 모달만 회전/창 크기 변경/브라우저 확대 시 화질을 재평가한다.
+  window.addEventListener('resize', queueModalQualityCheck, { passive: true });
+  window.visualViewport?.addEventListener('resize', queueModalQualityCheck, { passive: true });
 
   // 입양 문의(전화 걸기) 집계 — 위임 처리 (P1-1)
   document.getElementById('modalBody').addEventListener('click', (e) => {
@@ -539,7 +543,7 @@ function extractAllImages(animal) {
     list.push({
       key,
       url,
-      // 첫 장은 카드에서 이미 받은 400px 변형을 즉시 재사용하고,
+      // 카드 재사용이 불가능한 진입(QR 등)의 기본 미리보기는 400px이고,
       // 썸네일 선택 시에는 160px 이미지를 먼저 보여 준다.
       previewUrl: /^https?:\/\//i.test(cleanUrl) ? photoSrc(cleanUrl, 400) : url,
       thumbUrl: /^https?:\/\//i.test(cleanUrl) ? photoSrc(cleanUrl, 160) : url,
@@ -690,7 +694,7 @@ function renderPage(isAppend = false) {
     const mngSuffix = getDesertionNo(animal).slice(-5); // 관리번호 뒷자리 5자리
 
     return `
-      <div class="animal-card" onclick="showDetail(${realIndex})">
+      <div class="animal-card" data-animal-key="${escapeHtml(getDesertionNo(animal) || animal.noticeNo || '')}" onclick="showDetail(${realIndex}, { card: this })">
         <div class="card-image">
           <img src="${imgSrc}"${imgSrc2x ? ` srcset="${imgSrc} 1x, ${imgSrc2x} 2x"` : ''} alt="${escapeHtml(kindText)}" loading="lazy" decoding="async" onerror="handleImgError(this)">
           <span class="card-badge ${badge.cls}" title="${escapeHtml(animal.processState || '')}">${badge.text}</span>
@@ -842,32 +846,81 @@ function loadModalFullImage(url, priority = 'auto') {
   return job;
 }
 
+// 카드의 src 값(항상 400)이 아닌 브라우저가 실제로 고른 currentSrc를 사용한다.
+// 같은 개체 + 같은 원본의 고정된 두 프록시 주소만 허용한다. QR·미로딩·대체 그림은 제외.
+function readReadyCardPhoto(card, animal, first) {
+  const key = getDesertionNo(animal) || animal.noticeNo;
+  if (!key || !card || card.dataset.animalKey !== key || !/^https?:\/\//i.test(first?.rawUrl || '')) return null;
+  const img = card.querySelector('.card-image img');
+  if (!img?.complete || !img.naturalWidth || !img.naturalHeight || !img.currentSrc || img.dataset.fallback === '1') return null;
+  for (const width of [400, 800]) {
+    const expected = new URL(photoSrc(first.rawUrl, width), window.location.href).href;
+    if (img.currentSrc === expected) {
+      return { src: img.currentSrc, width, aspect: img.naturalWidth / img.naturalHeight, fullReady: false };
+    }
+  }
+  return null;
+}
+
+// object-fit:contain의 실제 표시 폭 × 화면 배율 × 핀치 배율. 큰 사진을 이미 썼으면 되내리지 않는다.
+function modalTargetUrl(photo, box) {
+  const card = photo.cardPhoto;
+  if (!card || card.fullReady || !box?.clientWidth || !box.clientHeight) return photo.url;
+  const cssWidth = Math.min(box.clientWidth, box.clientHeight * card.aspect);
+  const pixels = Math.ceil(cssWidth * (window.devicePixelRatio || 1) * (window.visualViewport?.scale || 1));
+  return pixels <= card.width ? card.src : photo.url;
+}
+
+function queueModalQualityCheck() {
+  if (!isModalOpen || !modalImages[modalImageIndex]?.cardPhoto || modalQualityFrame) return;
+  modalQualityFrame = requestAnimationFrame(() => {
+    modalQualityFrame = 0;
+    const photo = modalImages[modalImageIndex], img = document.getElementById('modalMainImg');
+    if (isModalOpen && photo?.cardPhoto && img && modalTargetUrl(photo, img.parentElement) !== img.dataset.fullSrc) {
+      upgradeModalMainImage(modalImageIndex);
+    }
+  });
+}
+
 function preloadAdjacentModalImage(index) {
   if (modalImages.length <= 1) return;
-  const next = modalImages[(index + 1) % modalImages.length];
+  const owner = activeAnimal;
   const schedule = window.requestIdleCallback || ((fn) => setTimeout(fn, 250));
-  schedule(() => { if (isModalOpen && next?.url) loadModalFullImage(next.url, 'low').catch(() => {}); }, { timeout: 1200 });
+  schedule(() => {
+    if (!isModalOpen || activeAnimal !== owner || modalImageIndex !== index || modalImages.length <= 1) return;
+    const next = modalImages[(index + 1) % modalImages.length];
+    const url = modalTargetUrl(next, document.getElementById('modalMainImg')?.parentElement);
+    // 마지막에서 첫 장으로 돌아갈 때도 이미 충분한 카드 사진의 1000px을 선로딩하지 않는다.
+    if (url && url !== next.cardPhoto?.src) loadModalFullImage(url, 'low').catch(() => {});
+  }, { timeout: 1200 });
 }
 
 async function upgradeModalMainImage(index) {
   const imgData = modalImages[index];
   const mainImg = document.getElementById('modalMainImg');
-  if (!imgData || !mainImg) return;
+  if (!isModalOpen || !imgData || !mainImg) return;
 
   const token = ++modalImageLoadToken;
-  mainImg.dataset.fullSrc = imgData.url;
+  const target = modalTargetUrl(imgData, mainImg.parentElement);
+  mainImg.dataset.fullSrc = target;
+  if (target === imgData.cardPhoto?.src) {
+    if (mainImg.src !== target) mainImg.src = target;
+    mainImg.classList.remove('is-preview');
+    preloadAdjacentModalImage(index);
+    return;
+  }
   try {
-    await loadModalFullImage(imgData.url, 'high');
+    await loadModalFullImage(target, 'high');
     if (token !== modalImageLoadToken || modalImageIndex !== index || !isModalOpen) return;
-    const liveImg = document.getElementById('modalMainImg');
-    if (!liveImg || liveImg.dataset.fullSrc !== imgData.url) return;
-    liveImg.dataset.fallback = '';
-    liveImg.onerror = function () { handleImgError(liveImg); };
-    liveImg.src = imgData.url;
-    liveImg.classList.remove('is-preview');
+    if (document.getElementById('modalMainImg') !== mainImg || mainImg.dataset.fullSrc !== target) return;
+    if (imgData.cardPhoto) imgData.cardPhoto.fullReady = true;
+    mainImg.dataset.fallback = '';
+    mainImg.onerror = function () { handleImgError(mainImg); };
+    mainImg.src = target;
+    mainImg.classList.remove('is-preview');
     preloadAdjacentModalImage(index);
   } catch (_) {
-    // 160/400px 미리보기는 유지한다. 큰 이미지 오류 때문에 화면을 비우지 않는다.
+    // 큰 사진 오류가 나도 현재 카드/미리보기는 유지한다.
   }
 }
 
@@ -898,7 +951,8 @@ function showModalImageByIndex(index) {
     mainImg.onerror = function () { handleImgError(mainImg); };
     const thumbImg = document.querySelectorAll('.modal-thumb-btn')[modalImageIndex]?.querySelector('img');
     const readyThumb = thumbImg?.complete && thumbImg.naturalWidth > 0 ? thumbImg.currentSrc || thumbImg.src : '';
-    mainImg.src = readyThumb || imgData.thumbUrl || imgData.previewUrl || imgData.url;
+    const cardSrc = imgData.cardPhoto?.fullReady ? imgData.url : imgData.cardPhoto?.src;
+    mainImg.src = cardSrc || readyThumb || imgData.thumbUrl || imgData.previewUrl || imgData.url;
     mainImg.classList.toggle('is-preview', mainImg.getAttribute('src') !== imgData.url);
   }
   if (badge) badge.textContent = `${modalImageIndex + 1} / ${modalImages.length} (${imgData.listLabel || imgData.key})`;
@@ -1026,6 +1080,12 @@ async function showDetail(index, opts = {}) {
 
   const stateText = (animal.processState || '').includes('공고') ? '📢 공고중' : '🏠 보호중';
   const baseImages = extractAllImages(animal);
+  const cardPhoto = readReadyCardPhoto(opts.card, animal, baseImages[0]);
+  if (cardPhoto) {
+    // 메인과 첫 썸네일이 같은 주소를 쓴다. 추가 사진 병합 뒤에도 이 참조는 유지된다.
+    baseImages[0].cardPhoto = cardPhoto;
+    baseImages[0].previewUrl = cardPhoto.src;
+  }
   const kindTitle = formatKind(animal.kindFullNm || animal.kindNm || animal.kindCd);
   const shareId = animal.shareId || getShareId(animal);
   const desertionNo = getDesertionNo(animal);
@@ -1040,10 +1100,11 @@ async function showDetail(index, opts = {}) {
 
   const noticePeriod = (animal.noticeSdt && animal.noticeEdt) ? `${formatDate(animal.noticeSdt)} ~ ${formatDate(animal.noticeEdt)}` : '정보 없음';
 
-  renderModalContent(animal, kindTitle, stateText, noticePeriod);
+  // 같은 JS 작업 안에서 먼저 표시 상태를 설정해야 사진 상자의 실제 크기를 읽을 수 있다.
   document.getElementById('modal').style.display = 'flex';
   document.body.style.overflow = 'hidden';
   isModalOpen = true;
+  renderModalContent(animal, kindTitle, stateText, noticePeriod);
 
   // 히스토리에 상세 열람 항목을 쌓는다 — 뒤로가기가 "사이트 밖"이 아니라
   // "상세 열기 이전"으로 돌아가게 된다 (P0-3)
@@ -1276,6 +1337,8 @@ function closeModal(options = {}) {
   modalImages = [];
   modalImageIndex = 0;
   modalImageLoadToken++;
+  if (modalQualityFrame) cancelAnimationFrame(modalQualityFrame);
+  modalQualityFrame = 0;
   pointerActive = false;
   pointerId = null;
   isModalGalleryLoading = false;

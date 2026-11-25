@@ -2,15 +2,15 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs/promises'),path=require('node:path'),{createHash}=require('node:crypto'),sharp=require('sharp');
 const {makeSite,boot,until,id,share,short,img}=require('./fixtures/t2-site.cjs');
 const json=r=>r.then(x=>x.json());const login=async s=>(await json(s.req('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:s.password})}))).token;
-const mark='/api/admin/sync',key=w=>createHash('sha1').update(img+'|'+w).digest('hex')+'.jpg';
+const mark='/api/admin/sync',key=(w,raw=img)=>createHash('sha1').update(raw+'|'+w).digest('hex')+'.jpg';
 test('T8 기반 Express T2 · 외부망 없이 실서버 경로 검증',{timeout:40000},async t=>{
- const dir=await makeSite(),snapshot=path.join(dir,'cache/animals-snapshot.json'),pics=path.join(dir,'cache/img-cache');let s=null;
+ const dir=await makeSite(),snapshot=path.join(dir,'cache/animals-snapshot.json'),pics=path.join(dir,'cache/img-cache');let s=null,second;
  t.after(async()=>{if(s)await s.close();await fs.rm(dir,{recursive:true,force:true});});s=await boot(dir,{hold:true});
  const tok=await login(s);assert(tok);const admin={Authorization:'Bearer '+tok};const manual=()=>s.req(mark,{method:'POST',headers:admin});
  await t.test('관리자 인증, 20분/하루 타이머, 콜드 목록 요청 합치기, 1,005건 21페이지·메모리 필터',async()=>{
   assert.equal((await s.req(mark)).status,401);assert.equal((await s.req(mark,{method:'POST'})).status,401);
   const a=s.req('/api/animals'),b=s.req('/api/animals?upkind=422400&refresh=1');await until(async()=>(await s.rpc('get')).pages.includes(1));
-  await s.rpc('list');const [ra,rb]=await Promise.all([a,b]);assert.match(ra.headers.get('cache-control'),/public, max-age=60/);const {items}=await ra.json();assert.equal(items.length,1005);assert.equal((await rb.json()).total,201);assert.equal(items[0].customStatus,'foster');assert.equal(items[0].logCount,1);assert.equal(items[0].shareId,share(1));assert.equal(items[0].shortCode,short(share(1)));
+  await s.rpc('list');const [ra,rb]=await Promise.all([a,b]);assert.match(ra.headers.get('cache-control'),/public, max-age=60/);const {items}=await ra.json();assert.equal(items.length,1005);assert.equal((await rb.json()).total,201);assert.equal(items[0].customStatus,'foster');assert.equal(items[0].logCount,1);second=items[0].popfile2;assert(second && second!==img);assert.equal(items[0].shareId,share(1));assert.equal(items[0].shortCode,short(share(1)));
   assert.equal((await json(s.req('/api/animals?bgnde=20391231'))).total,0);let l=await s.rpc('get');assert.equal(l.pages.length,21);assert(l.intervals.includes(1200000)&&l.intervals.includes(86400000));assert.match(l.ranges[0][0],/^\d{8}$/);assert(!JSON.stringify(items).includes('TEST_ONLY_NAME'));
   await until(async()=>(await s.rpc('get')).detail.length===1);assert.equal((await json(s.req(mark,{headers:admin}))).running,true);
   const disk=await fs.readFile(snapshot,'utf8');assert(!/TEST_ONLY_|careTel|officetel|chargeNm/.test(disk));assert.equal(JSON.parse(disk).items.length,1005);
@@ -21,10 +21,16 @@ test('T8 기반 Express T2 · 외부망 없이 실서버 경로 검증',{timeout
   const l=await s.rpc('get');assert.deepEqual(l.detail.map(d=>d.no),[id(1),id(2)]);assert(l.detail[1].time-l.detail[0].time>=1490);assert(l.detail.every(d=>d.timeout===8000&&d.ua==='GanghwaShelterSite/1.0 (+https://ganghwa-shelter.onrender.com)'));
   assert.equal(l.pages.length,21);assert.equal((await json(s.req('/api/detail-images?desertionNo='+id(1)))).count,2);assert.equal((await s.rpc('get')).detail.length,2);
  });
- await t.test('400px JPEG 영구 캐시, 메타데이터 제거, WebP 재사용',async()=>{
-  await until(async()=>{try{return (await fs.stat(path.join(pics,key(400)))).size>0;}catch(_){return false;}});
-  const meta=await sharp(path.join(pics,key(400))).metadata();assert.equal(meta.width,400);assert.equal(meta.format,'jpeg');assert(!meta.exif);
-  const url='/api/image-proxy?url='+encodeURIComponent(img)+'&w=400';assert.equal((await s.req(url,{headers:{Accept:'image/jpeg'}})).headers.get('content-type'),'image/jpeg');assert.match((await s.req(url,{headers:{Accept:'image/webp'}})).headers.get('content-type'),/image\/webp/);assert.equal((await s.rpc('get')).orig,1);
+ await t.test('대표 400px·두 번째 160px: 원본 2개만 다운로드, 폭별 JPEG/메타데이터 제거 및 WebP 재사용',async()=>{
+  for(const [url,w] of [[img,400],[second,160]]){
+   const file=path.join(pics,key(w,url));await until(async()=>{try{return (await fs.stat(file)).size>0;}catch(_){return false;}});
+   const meta=await sharp(file).metadata();assert.equal(meta.width,w);assert.equal(meta.format,'jpeg');assert(!meta.exif);
+   const proxy='/api/image-proxy?url='+encodeURIComponent(url)+'&w='+w;
+   assert.equal((await s.req(proxy,{headers:{Accept:'image/jpeg'}})).headers.get('content-type'),'image/jpeg');
+   const web=await s.req(proxy,{headers:{Accept:'image/webp'}});assert.equal(web.headers.get('content-type'),'image/webp');
+   assert.equal((await sharp(Buffer.from(await web.arrayBuffer())).metadata()).width,w);
+  }
+  assert.equal((await s.rpc('get')).orig,2);assert.equal((await manual()).status,200);assert.equal((await s.rpc('get')).orig,2);
  });
  await t.test('기존/신규 QR 및 단축 주소, 미등록 개체는 1회 대기 뒤 안내, 마지막 페이지 실패 보존',async()=>{
   const groups=async()=>(await s.rpc('get')).ranges.length;const n=await groups();assert.match(await (await s.req('/a/'+share(1))).text(),/__CARELINK_BOOT__/);assert.equal(await groups(),n);
@@ -44,7 +50,9 @@ test('T8 기반 Express T2 · 외부망 없이 실서버 경로 검증',{timeout
   await s.close();s=null;const old=path.join(pics,'f'.repeat(40)+'.jpg'),time=new Date(Date.now()-8*86400000);await fs.copyFile(path.join(pics,key(400)),old);await fs.utimes(old,time,time);
   s=await boot(dir,{offline:true});assert.equal((await json(s.req('/api/animals'))).total,1007);assert.equal((await json(s.req('/api/detail-images?desertionNo='+id(2)+'&refresh=1'))).count,2);assert.equal((await s.req('/api/image-proxy?w=400&url='+encodeURIComponent(img))).status,200);
   await until(async()=>!(await fs.stat(old).then(()=>true,()=>false)));assert((await fs.stat(path.join(pics,key(400)))).size>0);assert.equal((await s.rpc('get')).orig,0);
-  assert.match((await json(s.req('/api/version'))).version,/^1\.7\.0-/);
+  const restored=await s.req('/api/image-proxy?w=160&url='+encodeURIComponent(second),{headers:{Accept:'image/webp'}});
+  assert.equal(restored.status,200);assert.equal((await sharp(Buffer.from(await restored.arrayBuffer())).metadata()).width,160);assert.equal((await s.rpc('get')).orig,0);
+  assert((await json(s.req('/api/version'))).version.startsWith(require('../package.json').version+'-'));
  });
 });
 
