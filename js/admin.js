@@ -1,5 +1,5 @@
 // ==============================================================
-// 🔐 관리자 페이지 — 상태 지정(임시보호/입양진행중) + 케어 로그 CRUD
+// 🔐 관리자 페이지 — 보호소 상태 4단계 지정 + 케어 로그 CRUD
 //    텍스트 전용: 사진 업로드 없음
 // ==============================================================
 const TOKEN_KEY = 'shelter_admin_token';
@@ -8,12 +8,16 @@ let token = sessionStorage.getItem(TOKEN_KEY) || '';
 let animals = [];
 let selected = null;      // 선택된 개체(API 데이터 + customStatus)
 let record = null;        // { status, logs }
+let recordRequest = 0;    // 이전 개체의 늦은 응답이 현재 선택을 되돌리지 않게 한다.
 let editingLogId = null;  // 수정 중인 로그 id
 
-const STATUS_LABEL = { foster: '🏡 임시보호중', adopting: '🤝 입양진행중', none: '⭕ 지정 안 함' };
+// 표시 순서이기도 하다. none은 서버의 null, 기존 adopting은 상담중 그대로 호환.
+const STATUS_LABEL = {
+  none: '🏠 보호중', foster: '🏡 임시보호중', adopting: '🤝 입양상담중', confirmed: '✅ 입양확정'
+};
 const LOG_TYPES = {
   intake: '📍 입소', medical: '💉 치료', surgery: '🏥 수술', vaccine: '🛡️ 접종·예방',
-  care: '🐾 케어·일상', foster: '🏡 임시보호', adopting: '🤝 입양 진행', note: '📝 소식'
+  care: '🐾 케어·일상', foster: '🏡 임시보호', adopting: '🤝 입양 진행', confirmed: '✅ 입양확정', note: '📝 소식'
 };
 
 // ---------- 공통 ----------
@@ -153,7 +157,7 @@ async function loadAnimals() {
   }
 
   listEl.innerHTML = headerHtml + animals.map((a) => {
-    const st = a.customStatus || 'none';
+    const st = Object.prototype.hasOwnProperty.call(STATUS_LABEL, a.customStatus) ? a.customStatus : 'none';
     return `
       <div class="admin-animal-item ${selected && getKey(selected) === getKey(a) ? 'selected' : ''}" data-key="${getKey(a)}" onclick="selectAnimalBy('${getKey(a)}')">
         <img src="${thumbUrl(a)}" alt="" onerror="this.style.visibility='hidden'">
@@ -162,7 +166,7 @@ async function loadAnimals() {
           <div class="sub">${(a.kindFullNm || a.kindNm || '')} · ${a.happenPlace || ''}</div>
           <div class="sub">기록 ${a.logCount || 0}건</div>
         </div>
-        <span class="status-dot ${st}">${st === 'none' ? '보호중' : STATUS_LABEL[st]}</span>
+        <span class="status-dot ${st}">${STATUS_LABEL[st]}</span>
       </div>`;
   }).join('');
 }
@@ -174,18 +178,20 @@ function selectAnimalBy(key) {
 
 async function selectAnimal(a) {
   selected = a;
+  record = null;
   editingLogId = null;
   document.querySelectorAll('.admin-animal-item').forEach((el) =>
     el.classList.toggle('selected', el.dataset.key === getKey(a))
   );
   renderPanel({ loading: true });
   try {
-    record = await api(`/api/animals/${encodeURIComponent(getKey(a))}/logs`);
+    await refreshRecord();
   } catch (e) {
+    if (selected !== a) return;
     record = { status: a.customStatus, logs: [] };
     toast('기록 조회 실패: ' + e.message);
+    renderPanel();
   }
-  renderPanel();
 }
 
 // ---------- 편집 패널 ----------
@@ -196,23 +202,24 @@ function renderPanel(opt = {}) {
     return;
   }
   const a = selected;
-  const status = record?.status ?? a.customStatus ?? null;
+  // 최신 기록의 null(보호중)은 유효한 값. 예전 목록의 임보/상담 상태로 덮지 않는다.
+  const statusKey = (record ? record.status : a.customStatus) || 'none';
   const logs = opt.loading ? null : (record?.logs || []);
 
   panel.innerHTML = `
     <h2>${a.noticeNo || getKey(a)} <small style="color:#94A3B8; font-weight:400;">${a.kindFullNm || ''} ${a.colorCd || ''} ${a.age || ''}</small></h2>
 
-    <h3>① 현재 상태 지정</h3>
-    <div class="radio-row" id="statusRadios">
-      ${['none', 'foster', 'adopting'].map((s) => `
-        <label class="radio-pill ${s} ${((status || 'none') === s) ? 'checked' : ''}">
-          <input type="radio" name="customStatus" value="${s}" ${((status || 'none') === s) ? 'checked' : ''}>
-          ${STATUS_LABEL[s]}
+    <h3 id="statusHeading">① 현재 상태 지정</h3>
+    <div class="radio-row" id="statusRadios" role="radiogroup" aria-labelledby="statusHeading" aria-describedby="statusHint">
+      ${Object.entries(STATUS_LABEL).map(([key, label]) => `
+        <label class="radio-pill ${key}">
+          <input type="radio" name="customStatus" value="${key}" ${statusKey === key ? 'checked' : ''} ${opt.loading ? 'disabled' : ''}>
+          <span>${label}</span>
         </label>`).join('')}
     </div>
-    <p class="admin-hint">상태를 바꾸면 저장 시 타임라인에 자동으로 한 줄 기록이 추가됩니다.</p>
+    <p class="admin-hint" id="statusHint">상태가 바뀔 때만 케어 기록에 한 줄 남습니다. 입양확정을 선택해도 공공데이터의 공고 상태는 바뀌지 않습니다.</p>
     <div style="margin-top:10px;">
-      <button class="btn-primary" onclick="saveStatus()"><i class="fas fa-save"></i> 상태 저장</button>
+      <button type="button" class="btn-primary" onclick="saveStatus(this)" ${opt.loading ? 'disabled' : ''}><i class="fas fa-save"></i> 상태 저장</button>
     </div>
 
     <h3>② 케어 기록 ${opt.loading ? '<i class="fas fa-circle-notch fa-spin" style="font-size:0.8rem;"></i>' : `(${(logs || []).length}건)`}</h3>
@@ -264,20 +271,22 @@ function renderLogList(logs) {
 }
 
 // ---------- 상태 저장 ----------
-async function saveStatus() {
-  const val = document.querySelector('input[name=customStatus]:checked')?.value || 'none';
+async function saveStatus(button) {
+  const animal = selected, input = document.querySelector('#statusRadios input:checked');
+  if (!animal || !input || input.disabled || button.disabled) return;
+  const val = input.value;
   const status = val === 'none' ? null : val;
+  button.disabled = true;
   try {
-    await api(`/api/admin/animals/${encodeURIComponent(getKey(selected))}/status`, {
-      method: 'PUT',
-      body: JSON.stringify({ status })
+    await api(`/api/admin/animals/${encodeURIComponent(getKey(animal))}/status`, {
+      method: 'PUT', body: JSON.stringify({ status })
     });
-    toast(status ? `상태 저장: ${STATUS_LABEL[status]}` : '상태 지정 해제');
+    toast(`상태 저장: ${STATUS_LABEL[val]}`);
     logsCacheBust();
-    await Promise.all([loadAnimals(), refreshRecord()]);
+    await Promise.all([loadAnimals(), selected === animal && refreshRecord()]);
   } catch (e) {
     toast('실패: ' + e.message);
-  }
+  } finally { button.disabled = false; }
 }
 
 // ---------- 로그 추가/수정/삭제 ----------
@@ -342,8 +351,13 @@ function logsCacheBust() {
 
 async function refreshRecord() {
   if (!selected) return;
-  record = await api(`/api/animals/${encodeURIComponent(getKey(selected))}/logs`);
-  renderPanel();
+  const n = ++recordRequest;
+  try {
+    const next = await api(`/api/animals/${encodeURIComponent(getKey(selected))}/logs`, { cache: 'no-store' });
+    if (n !== recordRequest) return;
+    record = next;
+    renderPanel();
+  } catch (e) { if (n === recordRequest) throw e; }
 }
 
 // ==============================================================

@@ -4,7 +4,7 @@ const MAX_GALLERY_IMAGES = 16;
 
 let allAnimals = [];
 let currentStatsFilter = 'all';
-let currentStatusFilter = 'all';   // all | foster | adopting | news
+let currentStatusFilter = 'all';   // all | foster | adopting | confirmed | news
 let currentPage = 1;
 let pendingDetailId = null;
 let isModalOpen = false;
@@ -50,8 +50,13 @@ const SHELTER_LOGO_SRC = '/logo.svg';
 // ==============================================================
 const CUSTOM_STATUS = {
   foster:   { label: '🏡 임시보호중', cls: 'badge-foster',   color: '#8B5CF6' },
-  adopting: { label: '🤝 입양진행중', cls: 'badge-adopting', color: '#EC4899' }
+  adopting:  { label: '🤝 입양상담중', cls: 'badge-adopting', color: '#EC4899' },
+  confirmed: { label: '✅ 입양확정',   cls: 'badge-confirmed', color: '#1D4ED8' }
 };
+
+function isCustomStatus(value) {
+  return Object.prototype.hasOwnProperty.call(CUSTOM_STATUS, value);
+}
 
 const LOG_TYPES = {
   notice:   { label: '공고',      icon: '📢', color: '#F59E0B' },
@@ -61,7 +66,8 @@ const LOG_TYPES = {
   vaccine:  { label: '접종·예방', icon: '🛡️', color: '#10B981' },
   care:     { label: '케어·일상', icon: '🐾', color: '#64748B' },
   foster:   { label: '임시보호',  icon: '🏡', color: '#F97316' },
-  adopting: { label: '입양 진행', icon: '🤝', color: '#EC4899' },
+  adopting: { label: '입양 진행', icon: '🤝', color: '#EC4899' }, // 과거 기록의 종류는 그대로 보존
+  confirmed: { label: '입양확정',  icon: '✅', color: '#1D4ED8' },
   note:     { label: '소식',      icon: '📝', color: '#14B8A6' }
 };
 
@@ -129,9 +135,9 @@ function activeFilterSummary() {
   return Object.keys(f).length ? f : null;
 }
 
-// 카드/상세 뱃지: 보호소가 지정한 상태(foster/adopting)가 API 상태보다 우선
+// 카드/상세 뱃지: 보호소가 지정한 임시보호·입양 단계가 API 상태보다 우선
 function badgeFor(animal) {
-  if (animal.customStatus && CUSTOM_STATUS[animal.customStatus]) {
+  if (isCustomStatus(animal.customStatus)) {
     const m = CUSTOM_STATUS[animal.customStatus];
     return { text: m.label, cls: m.cls, color: m.color };
   }
@@ -440,7 +446,7 @@ function getFilteredAnimals() {
     const kind = a.kindFullNm || a.kindNm || a.kindCd || '';
     return !kind.includes('개') && !kind.includes('고양이');
   });
-  if (currentStatusFilter === 'foster' || currentStatusFilter === 'adopting') {
+  if (isCustomStatus(currentStatusFilter)) {
     list = list.filter(a => a.customStatus === currentStatusFilter);
   } else if (currentStatusFilter === 'news') {
     list = list.filter(a => (a.logCount || 0) > 0);
@@ -478,13 +484,12 @@ function setupStatusFilterEvents() {
 }
 
 function updateStatusChips() {
-  const counts = { all: allAnimals.length, foster: 0, adopting: 0, news: 0 };
+  const counts = { all: allAnimals.length, foster: 0, adopting: 0, confirmed: 0, news: 0 };
   allAnimals.forEach((a) => {
-    if (a.customStatus === 'foster') counts.foster++;
-    if (a.customStatus === 'adopting') counts.adopting++;
+    if (isCustomStatus(a.customStatus)) counts[a.customStatus]++;
     if ((a.logCount || 0) > 0) counts.news++;
   });
-  const map = { all: 'cntAll', foster: 'cntFoster', adopting: 'cntAdopting', news: 'cntNews' };
+  const map = { all: 'cntAll', foster: 'cntFoster', adopting: 'cntAdopting', confirmed: 'cntConfirmed', news: 'cntNews' };
   Object.entries(map).forEach(([key, id]) => {
     const el = document.getElementById(id);
     if (el) el.textContent = counts[key];

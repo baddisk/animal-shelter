@@ -323,9 +323,10 @@ body {
    ✨ 상태 오버레이 & 케어 타임라인 (추가분)
    ============================================================== */
 
-/* 임시보호/입양진행중 뱃지 */
+/* 보호소가 지정한 임시보호·입양 단계 */
 .badge-foster { background: #8B5CF6; }
 .badge-adopting { background: #EC4899; }
+.badge-confirmed { background: #1D4ED8; }
 
 /* 카드의 최근 소식 */
 .card-news-pill {
@@ -354,6 +355,7 @@ body {
 .status-chip.active[data-status="all"] { background: #334155; border-color: #334155; }
 .status-chip.chip-foster.active { background: #8B5CF6; border-color: #8B5CF6; }
 .status-chip.chip-adopting.active { background: #EC4899; border-color: #EC4899; }
+.status-chip.chip-confirmed.active { background: #1D4ED8; border-color: #1D4ED8; }
 .status-chip.chip-news.active { background: #0EA5E9; border-color: #0EA5E9; }
 
 /* 케어 타임라인 */
@@ -401,6 +403,7 @@ body {
 .status-dot.none { background: #94A3B8; }
 .status-dot.foster { background: #8B5CF6; }
 .status-dot.adopting { background: #EC4899; }
+.status-dot.confirmed { background: #1D4ED8; }
 .admin-panel { background: #fff; border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px; }
 .admin-panel h2 { font-size: 1.05rem; margin-bottom: 12px; }
 .admin-panel h3 { font-size: 0.95rem; margin: 20px 0 10px; color: var(--primary); }
@@ -414,11 +417,16 @@ body {
 .btn-primary:hover { background: var(--primary-dark); }
 .btn-ghost { background: #fff; color: var(--text-light); border: 1.5px solid var(--border); border-radius: 8px; padding: 9px 16px; font-weight: 600; cursor: pointer; font-family: inherit; text-decoration: none; font-size: 0.85rem; display: inline-block; }
 .radio-row { display: flex; gap: 8px; flex-wrap: wrap; }
-.radio-pill { border: 1.5px solid var(--border); border-radius: 20px; padding: 7px 14px; font-size: 0.84rem; font-weight: 600; cursor: pointer; color: var(--text-light); user-select: none; }
-.radio-pill input { display: none; }
-.radio-pill.checked.none { background: #334155; border-color: #334155; color: #fff; }
-.radio-pill.checked.foster { background: #8B5CF6; border-color: #8B5CF6; color: #fff; }
-.radio-pill.checked.adopting { background: #EC4899; border-color: #EC4899; color: #fff; }
+.radio-pill { position: relative; cursor: pointer; user-select: none; --pill-color: #334155; }
+.radio-pill.foster { --pill-color: #6D28D9; }
+.radio-pill.adopting { --pill-color: #BE185D; }
+.radio-pill.confirmed { --pill-color: #1D4ED8; }
+/* 실제 라디오를 키보드/스크린 리더에서 숨기지 않고, 저장 전에도 선택 표시를 즉시 갱신한다. */
+.radio-pill input { position: absolute; width: 1px; height: 1px; margin: 0; clip-path: inset(50%); overflow: hidden; }
+.radio-pill span { display: inline-flex; align-items: center; min-height: 38px; padding: 7px 14px; border: 1.5px solid var(--border); border-radius: 20px; font-size: 0.84rem; font-weight: 600; color: var(--text-light); }
+.radio-pill input:checked + span { background: var(--pill-color); border-color: var(--pill-color); color: #fff; }
+.radio-pill input:focus-visible + span { outline: 2px solid #0F172A; outline-offset: 2px; }
+.radio-pill input:disabled + span { opacity: 0.65; cursor: wait; }
 .admin-log-item { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start; }
 .admin-log-item .meta { flex: 1; min-width: 0; }
 .admin-log-item .t { font-size: 0.85rem; font-weight: 700; word-break: keep-all; }

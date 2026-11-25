@@ -10,7 +10,15 @@ const list=opt.hold?new Promise(r=>openList=r):Promise.resolve(),crawl=opt.hold?
 let allowDB;
 if(opt.mockCareDB){
  const gate=new Promise(r=>allowDB=r);const modulePath=local.resolve('mongodb');
- const collection=name=>({find:()=>({toArray:async()=>name==='animals'?[{_id:id(2),status:'adopting',logs:[]}]:[]})});
+ const docs=new Map([[id(2),{_id:id(2),status:'adopting',logs:[]}]]);log.careWrites=[];
+ const collection=name=>({
+  find:()=>({toArray:async()=>name==='animals'?structuredClone([...docs.values()]):[]}),
+  async updateOne(filter,update,options){
+   if(name!=='animals'||!options?.upsert||!update.$set)throw Error('unexpected care fixture write');
+   const saved=structuredClone(update.$set);docs.set(filter._id,{...saved,_id:filter._id});
+   log.careWrites.push({key:filter._id,status:saved.status,logs:saved.logs.length});
+  }
+ });
  class FakeClient {async connect(){await gate;} db(){return {collection};}}
  require.cache[modulePath]={id:modulePath,filename:modulePath,loaded:true,exports:{MongoClient:FakeClient}};
 }

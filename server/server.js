@@ -69,7 +69,7 @@ let cachedGanghwaParams = null;
 
 // ==============================================================
 // 📒 로컬 케어 데이터 레이어 (상태 오버레이 + 케어 로그)
-//    국가 API에는 '임시보호중/입양진행중' 상태와 치료 이력이 없으므로
+//    보호소가 관리하는 임시보호·입양상담·입양확정 상태와 치료 이력은 별도이므로
 //    보호소가 직접 입력한 데이터를 API 결과 위에 덧씌운다(overlay).
 //    개체 매칭 키 = desertionNo (없으면 noticeNo)
 // ==============================================================
@@ -147,8 +147,15 @@ async function persistAnimal(key) {
   }
 }
 
-const VALID_STATUSES = ['foster', 'adopting'];
-const VALID_LOG_TYPES = ['intake', 'medical', 'surgery', 'vaccine', 'care', 'foster', 'adopting', 'note'];
+// 보호중은 기존과 같은 null(오버레이 없음). adopting은 상담 단계로 표시한다.
+// confirmed는 보호소의 확정 표시일 뿐, 국가 API의 종료(입양) 처리가 아니다.
+const STATUS_CHANGES = new Map([
+  [null,        { type: 'care',      title: '보호중으로 변경' }],
+  ['foster',    { type: 'foster',    title: '임시보호 이동' }],
+  ['adopting',  { type: 'adopting',  title: '입양상담 시작' }],
+  ['confirmed', { type: 'confirmed', title: '입양확정' }]
+]);
+const VALID_LOG_TYPES = ['intake', 'medical', 'surgery', 'vaccine', 'care', 'foster', 'adopting', 'confirmed', 'note'];
 
 function animalKeyOf(item) {
   return String(item?.desertionNo || item?.desertionNO || item?.noticeNo || '').trim();
@@ -186,7 +193,7 @@ function enrichItem(item) {
   const last = logs[0];
   return {
     ...item,
-    customStatus: rec?.status || null,          // 'foster' | 'adopting' | null
+    customStatus: rec?.status || null,          // null | 'foster' | 'adopting' | 'confirmed'
     statusUpdatedAt: rec?.statusUpdatedAt || null,
     logCount: logs.length,
     lastLog: last ? { date: last.date, type: last.type, title: last.title } : null,
@@ -627,22 +634,27 @@ app.get('/api/animals/:key/logs', (req, res) => {
 // ---- 관리자: 상태 변경 ----
 app.put('/api/admin/animals/:key/status', requireAdmin, async (req, res) => {
   const key = String(req.params.key).trim();
-  const status = req.body?.status || null;
-  if (status && !VALID_STATUSES.includes(status)) {
-    return res.status(400).json({ error: 'status는 foster | adopting | null 이어야 합니다.' });
+  if (!key) return res.status(400).json({ error: '개체 번호가 필요합니다.' });
+  const status = req.body?.status; // 잘못된 입력이 기존 상태를 지우지 않도록 null만 해제로 인정
+  const change = STATUS_CHANGES.get(status);
+  if (!change) return res.status(400).json({ error: 'status는 null | foster | adopting | confirmed 이어야 합니다.' });
+  const existing = getRec(key);
+  if ((existing?.status ?? null) === status) {
+    // 같은 상태 재저장은 역사/날짜를 바꾸거나 빈 DB 레코드를 만들지 않는다.
+    return res.json({ ok: true, record: existing || { status: null, statusUpdatedAt: null, logs: [] } });
   }
-  const rec = getRec(key, true);
-  rec.status = status || null;
+  const rec = existing || getRec(key, true);
+  rec.status = status;
   rec.statusUpdatedAt = status ? new Date().toISOString() : null;
 
-  // 상태 변경 시 타임라인에 남을 로그 자동 생성 (addLog=false로 끌 수 있음)
-  if (status && req.body?.addLog !== false) {
-    const label = status === 'foster' ? '임시보호 이동' : '입양 진행 시작';
+  // 명시적으로 바뀐 단계만 한 줄 기록한다(보호중 복귀 포함). 과거 기록은 다시 쓰지 않는다.
+  if (req.body.addLog !== false) {
+    if (rec.logs == null) rec.logs = []; // 기록 배열이 없는 예전 상태 문서도 허용
     rec.logs.push({
       id: newId('l'),
       date: todayStr(),
-      type: status,
-      title: label,
+      type: change.type,
+      title: change.title,
       content: String(req.body?.note || '').trim().slice(0, 500),
       createdAt: new Date().toISOString()
     });
