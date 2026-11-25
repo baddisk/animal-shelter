@@ -1,23 +1,26 @@
 {
   "name": "ganghwa-shelter",
-  "version": "1.7.2",
+  "version": "1.8.0",
   "private": true,
   "description": "강화유기동물보호센터 - 보호중 유기동물 정보·입양 안내 사이트",
   "main": "server/server.js",
   "scripts": {
     "start": "node server/server.js",
     "dev": "node --watch server/server.js",
-    "test": "node --test tests/careStatus.test.cjs tests/modalPhoto.test.cjs tests/animalSync.test.cjs tests/statsDaily.test.cjs tests/t2Server.test.cjs"
+    "test": "node --test tests/qrPhoto.test.cjs tests/careStatus.test.cjs tests/modalPhoto.test.cjs tests/animalSync.test.cjs tests/statsDaily.test.cjs tests/t2Server.test.cjs"
   },
   "engines": {
     "node": ">=20.9.0"
   },
   "dependencies": {
+    "archiver": "^8.0.0",
     "axios": "^1.7.9",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "jsqr": "^1.4.0",
     "mongodb": "^6.12.0",
+    "qrcode": "^1.5.4",
     "sharp": "^0.35.4"
   }
 }

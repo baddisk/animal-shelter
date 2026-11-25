@@ -584,3 +584,24 @@ body {
 
 /* 이미 그려진 목록 앞에 높이를 추가하지 않아, 재검증 실패 안내도 스크롤을 밀지 않는다. */
 .list-notice.cached-warning:not([hidden]) { position: fixed; z-index: 30; bottom: 1rem; left: 50%; transform: translateX(-50%); width: max-content; max-width: 90vw; margin: 0; padding: .65rem .9rem; border-radius: .65rem; background: #fff; box-shadow: 0 2px 12px #0002; pointer-events: none; }
+
+/* 관리자 전용 QR 도구. 업로드 자리와 원본 사진의 순번을 시각적으로 분리한다. */
+.qr-batch-bar { display: grid; gap: 4px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.qr-batch-bar small,.qr-help { color: #475569; font-size: .78rem; line-height: 1.55; }
+.qr-batch-bar small:empty,.qr-feedback:empty { display: none; }
+.qr-tick { flex-shrink: 0; border-radius: 6px; background: #DCFCE7; color: #166534; padding: 3px 6px; font-size: .7rem; font-weight: 800; }
+#qrSection { border-top: 1px solid var(--border); margin-top: 20px; }
+#qrSection fieldset { min-width: 0; border: none; padding: 0; margin: 12px 0; }
+#qrSection legend { padding: 0; margin: 0 0 7px; font-weight: 700; font-size: .88rem; }
+.qr-thumbs,.qr-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.qr-thumbs label { position: relative; cursor: pointer; }
+.qr-thumbs input { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); }
+.qr-thumbs span { display: grid; justify-items: center; gap: 3px; padding: 4px; border: 2px solid #CBD5E1; border-radius: 8px; font-weight: 700; font-size: .77rem; }
+.qr-thumbs img { display: block; width: 58px; height: 52px; object-fit: cover; border-radius: 4px; background: #E2E8F0; }
+.qr-thumbs input:checked + span,.qr-actions [aria-pressed="true"] { border-color: #0369A1; background: #E0F2FE; color: #075985; }
+.qr-thumbs input:focus-visible + span { outline: 2px solid #0F172A; outline-offset: 2px; }
+#qrSection .qr-upload { padding: 10px 12px; border: 1px solid #CBD5E1; border-radius: 8px; }
+.qr-upload .qr-actions { margin-top: 7px; }
+.qr-error,.qr-warning,.qr-feedback { margin-top: 8px; font-size: .84rem; line-height: 1.5; }
+.qr-error,.qr-warning { color: #9A3412; }.qr-feedback { color: #075985; }
+#qrSection button:disabled,#qrBatch:disabled { opacity: .6; cursor: not-allowed; }

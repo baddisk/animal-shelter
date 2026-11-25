@@ -132,15 +132,17 @@ async function syncNow() {
   finally { syncingNow = false; btn.disabled = false; btn.textContent = '지금 동기화'; loadSyncStatus(); }
 }
 setInterval(() => { if (!document.hidden && token) loadSyncStatus(); }, 60_000);
+let adminListRequest = 0;
 async function loadAnimals() {
+  const request = ++adminListRequest;
   const listEl = document.getElementById('adminList');
   // 보호 상태·케어 기록 저장 직후에도 60초 된 HTTP 캐시 대신 최신 메모리 목록을 받는다.
   try {
-    const res = await fetch('/api/animals', {cache:'no-store'});
-    if (!res.ok) throw new Error('목록 조회 실패');
-    const data = await res.json();
+    const data = await api('/api/admin/animals', {cache:'no-store'}); // QR 생성/자리 기록은 인증한 관리자에게만 제공
+    if (request !== adminListRequest) return;
     animals = data.items || [];
   } catch (_) {
+    if (request !== adminListRequest) return;
     if (!animals.length) listEl.textContent = '목록을 준비 중입니다. 잠시 후 다시 확인해 주세요.';
     return;
   }
@@ -149,6 +151,9 @@ async function loadAnimals() {
     <div class="admin-list-header">
       <span><i class="fas fa-list"></i> 보호중 개체 <b>${animals.length}</b>마리</span>
       <button type="button" class="icon-btn edit" title="저장된 목록 다시 읽기" onclick="loadAnimals()"><i class="fas fa-sync-alt"></i></button>
+    </div><div class="qr-batch-bar">
+      <button type="button" id="qrBatch" class="btn-ghost" onclick="adminQr.batch()">공고 중 QR 미적용 일괄 받기 (ZIP)</button>
+      <small>이 도구의 생성 기록 기준 · 한 번에 최대 20마리</small><small id="qrBatchStatus" role="status"></small>
     </div>`;
 
   if (!animals.length) {
@@ -166,9 +171,11 @@ async function loadAnimals() {
           <div class="sub">${(a.kindFullNm || a.kindNm || '')} · ${a.happenPlace || ''}</div>
           <div class="sub">기록 ${a.logCount || 0}건</div>
         </div>
+        ${a.qrMade ? `<span class="qr-tick" title="QR 사진 생성됨${a.qrSlot ? ` · KAWIS ${Number(a.qrSlot)}번` : ' · 업로드 자리 미입력'}">QR ✓</span>` : ''}
         <span class="status-dot ${st}">${STATUS_LABEL[st]}</span>
       </div>`;
   }).join('');
+  window.adminQr?.refresh();
 }
 
 function selectAnimalBy(key) {
@@ -251,7 +258,9 @@ function renderPanel(opt = {}) {
       <button class="btn-primary" onclick="submitLog()">${editingLogId ? '수정 저장' : '<i class="fas fa-plus"></i> 기록 추가'}</button>
       ${editingLogId ? '<button class="btn-ghost" onclick="cancelEdit()">수정 취소</button>' : ''}
     </div>
+    <section id="qrSection" aria-labelledby="qrHeading"></section>
   `;
+  window.adminQr?.refresh();
 }
 
 function renderLogList(logs) {

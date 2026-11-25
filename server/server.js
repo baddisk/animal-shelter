@@ -7,6 +7,8 @@ const path = require('path');
 const pkg = require('../package.json');
 const dataPath = require('../lib/dataPath');
 const { createAnimalSync, apiPhotoCount, filterAnimals, CRAWL_DELAY_MS } = require('../services/animalSync');
+const { registerQrRoutes } = require('./qrRoutes');
+const { shareFromCode, QrError } = require('../services/qrPhoto');
 const https = require('https');
 const http = require('http');
 
@@ -86,13 +88,16 @@ try {
 } catch (_) { /* 최초 실행 시 파일 없음 */ }
 
 let saveTimer = null;
+function writeLocalDB() {
+  const tmp=DB_PATH+'.tmp';
+  fs.writeFileSync(tmp,JSON.stringify(db,null,2),{mode:0o600});
+  fs.renameSync(tmp,DB_PATH);
+}
 function saveDB() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try {
-      const tmp = DB_PATH + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
-      fs.renameSync(tmp, DB_PATH);
+      writeLocalDB();
     } catch (e) {
       console.error('💾 DB 저장 실패:', e.message);
     }
@@ -137,7 +142,11 @@ async function persistAnimal(key) {
   const rec = db.animals[key];
   try {
     if (mongoColl) {
-      if (rec) await mongoColl.updateOne({ _id: key }, { $set: rec }, { upsert: true });
+      if (rec) {
+        // QR 생성/자리 저장이 동시에 진행돼도 케어 저장이 그 두 필드를 되돌리지 않는다.
+        const {qrMade,qrSlot,...care}=rec;
+        await mongoColl.updateOne({ _id:key }, { $set:care }, { upsert:true });
+      }
       else await mongoColl.deleteOne({ _id: key });
     } else {
       saveDB(); // 로컬 모드
@@ -145,6 +154,21 @@ async function persistAnimal(key) {
   } catch (e) {
     console.error('💾 저장 실패:', e.message);
   }
+}
+
+// QR은 다운로드 직전 저장 성공을 확인한다. 생성 시 qrSlot을 추정/초기화하지 않는다.
+async function writeQrFields(key, fields) {
+  try {
+    if (mongoColl) {
+      await mongoColl.updateOne({_id:key},{$set:fields,$setOnInsert:{status:null,statusUpdatedAt:null,logs:[]}},{upsert:true});
+      Object.assign(getRec(key,true),fields);
+    } else {
+      const previous=getRec(key);
+      db.animals[key]={...(previous || {status:null,statusUpdatedAt:null,logs:[]}),...fields};
+      try { writeLocalDB(); }
+      catch (err) { if(previous)db.animals[key]=previous;else delete db.animals[key]; throw err; }
+    }
+  } catch (_) { throw new QrError(503,'SAVE','QR 작업 기록을 저장하지 못했습니다. 저장소를 확인한 뒤 다시 시도해 주세요.'); }
 }
 
 // 보호중은 기존과 같은 null(오버레이 없음). adopting은 상담 단계로 표시한다.
@@ -535,7 +559,11 @@ function ogTagsFor(req, animal) {
 
   // ⚠️ 미리보기 이미지는 반드시 우리 서버(프록시) 주소여야 한다 —
   //    원본 animal.go.kr 주소는 로봇이 못 읽는다. w=1000으로 가볍게.
-  const pop = animal.popfile1 || animal.popfile2 || '';
+  const uploaded = getRec(animalKeyOf(animal))?.qrSlot;
+  // KAWIS의 물리적 자리 번호다. 원본 선택기의 중복 제거 후 번호와 혼동하지 않는다.
+  const skip = uploaded===1 || uploaded===2 ? animal['popfile'+uploaded] : null;
+  const skipKey = skip && (qrLocalSource(skip) || providerImageUrl(skip)) ? qrPhotoKey(skip) : null;
+  const pop = qrPhotoUrls(animal).find(src=>!skipKey || qrPhotoKey(src)!==skipKey) || '';
   const ogImage = !pop ? ''
     : String(pop).startsWith('/')
       ? `${origin}${pop}`
@@ -572,6 +600,7 @@ app.get(['/a/:id', '/p/:id'], async (req, res, next) => {
   // 공통 템플릿만 캐시한다. OG와 모달 시작 ID는 요청마다 별도로 넣는다.
   let html;
   try { html = renderHtml('index.html'); } catch (err) { return next(err); }
+  await dbReady; // 부팅 직후에도 이미 KAWIS에 올린 QR 사진을 OG로 보내지 않는다.
   const tags = ogTagsFor(req, animal);
   // <!--OG--> 자리에 미리보기 메타 태그를, <!--BOOT--> 자리에 자동 열기 스크립트를 끼운다
   const boot = `<script>window.__CARELINK_BOOT__=${JSON.stringify(shareId).replace(/</g, '\\u003c')};</script>`;
@@ -584,6 +613,13 @@ app.get(['/a/:id', '/p/:id'], async (req, res, next) => {
 
   res.set('Content-Type', 'text/html; charset=utf-8');
   res.send(html);
+});
+
+// 사진에 인쇄한 짧은 주소. 조회/갱신은 기존 /a/ 경로에서만 한 번 수행한다.
+app.get('/q/:code',(req,res)=>{
+  const id=shareFromCode(req.params.code);
+  if(!id)return pendingShare(res);
+  return res.set('Cache-Control','no-cache').redirect(302,'/a/'+id);
 });
 
 // 짧은 공유 주소 /s/:코드 → /a/:공유아이디 로 넘긴다 (P1-3, 문자 요금 절약)
@@ -1200,6 +1236,51 @@ const animalSync = createAnimalSync({
   snapshotFile:dataPath(DEMO ? 'animals-snapshot.demo.json' : 'animals-snapshot.json'),
   fetchAllAnimalsFromApi:q => DEMO ? filterAnimals(MOCK_ANIMALS, q) : fetchGanghwaAnimalsFromApi(q),
   crawlDetailImages, shareIdOf, shortCodeOf, getResizedImage:(url, w) => getImageVariant(url, w, true)
+});
+// 스냅샷이 가진 주소만 허용한다. 클라이언트가 외부 URL 또는 파일 경로를 지정할 수 없다.
+function qrLocalSource(s) {
+  return typeof s==='string' && /^\/(img|uploads)\/(?:[\w.-]+\/)*[\w.-]+\.(?:jpe?g|png|webp|avif|gif)$/i.test(s) && !s.split('/').some(p=>p==='.' || p==='..');
+}
+function qrPhotoKey(src) {
+  if(qrLocalSource(src))return src;
+  const u=new URL(sanitizeUrl(src));
+  if(u.search && !/\/files\/shelter\//i.test(u.pathname) && !/[?&]f_(?:id|seq)=\d/i.test(u.search)){
+    u.searchParams.sort();return u.href;
+  }
+  return filenameOf(src);
+}
+function qrPhotoUrls(a) {
+  const raw=Array.from({length:8},(_,i)=>a['popfile'+(i+1)]);
+  raw.push(...animalSync.getImages(animalKeyOf(a))); // 이미 수집된 T2 주소만, 여기서 크롤하지 않는다.
+  const unique=new Map();
+  for(const src of raw){
+    if(!src || !(qrLocalSource(src) || providerImageUrl(src)))continue;
+    const k=qrPhotoKey(src); if(k && !unique.has(k))unique.set(k,src);
+  }
+  return [...unique.values()];
+}
+function qrSourceKey(url){return imgKey(url,0).slice(0,16);}
+async function qrOriginal(src) {
+  if(providerImageUrl(src))return (await getOriginalImage(src)).buf; // 프록시의 폭 0 캐시·원본 함수, 400/1000 변형 아님
+  if(!qrLocalSource(src))throw Error('invalid local photo');
+  const dir=path.join(PUBLIC_DIR,src.split('/')[1]);
+  const file=await fs.promises.realpath(path.join(PUBLIC_DIR,src));
+  if(!file.startsWith(dir+path.sep))throw Error('invalid local photo');
+  const st=await fs.promises.stat(file);if(!st.isFile() || st.size>20*1024*1024)throw Error('invalid size');
+  return fs.promises.readFile(file);
+}
+registerQrRoutes({app,requireAdmin,dbReady,getRec,keyOf:animalKeyOf,writeFields:writeQrFields,original:qrOriginal,photos:qrPhotoUrls,sourceKey:qrSourceKey,
+  today:()=>todayStr().replace(/-/g,''),
+  items:async()=>{
+    if(!getAllAnimals().length)await animalSync.refreshForRead();
+    const items=getAllAnimals();if(!items.length)throw new QrError(503,'LIST','목록을 준비 중입니다. 잠시 후 다시 시도해 주세요.');
+    return items;
+  },
+  adminItem:a=>{
+    const rec=getRec(animalKeyOf(a));
+    return {...enrichItem(a),qrMade:!!rec?.qrMade,qrSlot:rec?.qrSlot || null,
+      qrPhotos:qrPhotoUrls(a).slice(0,8).map(src=>({v:qrSourceKey(src),thumb:qrLocalSource(src)?src:'/api/image-proxy?url='+encodeURIComponent(src)+'&w=160'}))};
+  }
 });
 app.get('/api/animals', async (req, res, next) => {
   try {
