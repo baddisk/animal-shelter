@@ -222,6 +222,9 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('resize', queueModalQualityCheck, { passive: true });
   window.visualViewport?.addEventListener('resize', queueModalQualityCheck, { passive: true });
 
+  document.getElementById('modalBody').addEventListener('click', onInstaClick);
+  window.addEventListener('message', onInstaPlayerMessage);
+
   // 입양 문의(전화 걸기) 집계 — 위임 처리 (P1-1)
   document.getElementById('modalBody').addEventListener('click', (e) => {
     const tel = e.target && e.target.closest ? e.target.closest('a[href^="tel:"]') : null;
@@ -368,6 +371,7 @@ function readListCache() {
 // 상담 전화·직원 정보·자유기재 위치/특징·케어 로그 제목을 localStorage에 넣지 않는다.
 function cachedCard(a) {
   const r={};
+  const post=instagramUrlOf(a);if(post)r.instagramUrl=post; // 정규 게시물 주소만, 쿼리/방문자 정보 제외
   const fields='desertionNo noticeNo happenDt noticeSdt noticeEdt processState updTm upKindCd upKindNm kindCd kindNm kindFullNm age weight sexCd neuterYn colorCd customStatus statusUpdatedAt logCount shareId shortCode'.split(' ');
   for(const k of fields) if (typeof a[k]==='number' || (typeof a[k]==='string' && a[k].length<=160 && !/[<>@\r\n]/.test(a[k]) &&
       !/\b\d{1,3}(?:\.\d{1,3}){3}\b|(?:^|\D)0\d{1,2}[- ]\d{3,4}[- ]\d{4}(?:$|\D)/.test(a[k]))) r[k]=a[k];
@@ -402,7 +406,12 @@ function applyList(items) {
       const notice=activeAnimal.noticeSdt&&activeAnimal.noticeEdt?`${formatDate(activeAnimal.noticeSdt)} ~ ${formatDate(activeAnimal.noticeEdt)}`:'정보 없음';
       details.outerHTML=modalDetailHtml(activeAnimal,formatKind(activeAnimal.kindFullNm||activeAnimal.kindNm||activeAnimal.kindCd),
         (activeAnimal.processState||'').includes('공고')?'📢 공고중':'🏠 보호중',notice);
+      syncInstaSection(activeAnimal);
       if(scroller && top!=null)scroller.scrollTop=top;
+    }else if(!fresh){
+      // 성공한 새 목록에서 빠진 개체의 오래된 게시물/재생 프레임은 남기지 않는다.
+      delete activeAnimal.instagramUrl;
+      syncInstaSection(activeAnimal);
     }
   }
   hasPaintedList = true;
@@ -704,6 +713,7 @@ function renderPage(isAppend = false) {
           <img src="${imgSrc}"${imgSrc2x ? ` srcset="${imgSrc} 1x, ${imgSrc2x} 2x"` : ''} alt="${escapeHtml(kindText)}" loading="lazy" decoding="async" onerror="handleImgError(this)">
           <span class="card-badge ${badge.cls}" title="${escapeHtml(animal.processState || '')}">${badge.text}</span>
           <span class="card-kind">${escapeHtml(kindText)}</span>
+          ${instagramUrlOf(animal)?'<span class="card-insta-mark" role="img" aria-label="인스타그램 게시물 있음" title="인스타그램 게시물 있음">▶</span>':''}
           ${logCount > 0 ? `<span class="card-news-pill" title="케어 기록 ${logCount}건"><i class="far fa-newspaper"></i> ${logCount}</span>` : ''}
         </div>
         <div class="card-body">
@@ -1141,8 +1151,8 @@ async function showDetail(index, opts = {}) {
       const preservedIndex = modalImages.findIndex((img) => img.rawUrl === selectedRawUrl);
       modalImageIndex = preservedIndex >= 0 ? preservedIndex : Math.max(0, Math.min(modalImageIndex, modalImages.length - 1));
       isModalGalleryLoading = false;
-      // API 기본 사진이 전혀 없고 크롤링 사진만 발견된 경우에만 전체 구조를 한 번 만든다.
-      if (!hadImages && modalImages.length) renderModalContent(animal, kindTitle, stateText, noticePeriod);
+      // 추가 사진만 뒤늦게 생긴 경우에도 갤러리만 만들고 재생 중인 영상은 유지한다.
+      if (!hadImages && modalImages.length) renderModalContent(animal, kindTitle, stateText, noticePeriod, true);
       else refreshModalGalleryControls();
     });
 
@@ -1208,7 +1218,114 @@ function refreshModalGalleryControls() {
   setupModalImageNavigation();
 }
 
-function renderModalContent(animal, kindTitle, stateText, noticePeriod) {
+// T9: 링크/재생 버튼은 로컬 HTML뿐이다. 인스타그램 자원은 명시적으로 재생을 누른 뒤에만 만든다.
+function instagramUrlOf(animal) {
+  return window.CarelinkInstagram?.normalize(animal?.instagramUrl) || null;
+}
+function instaSectionHtml(animal) {
+  const url=instagramUrlOf(animal);
+  if(!url)return '';
+  const safe=escapeHtml(url);
+  return `<section class="insta-video" data-url="${safe}" aria-labelledby="instaVideoTitle">
+    <h3 id="instaVideoTitle">▶ 영상으로 만나기</h3>
+    <div class="insta-embed-box"><button type="button" class="insta-play-btn" data-url="${safe}">▶ 영상 보기</button></div>
+    <p class="insta-play-note" role="status">영상을 누르면 인스타그램에 연결됩니다.</p>
+    <a class="insta-direct-link" href="${safe}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">인스타그램 앱에서 보기</a>
+  </section>`;
+}
+function syncInstaSection(animal) {
+  const gallery=document.querySelector('#modalBody > .modal-gallery-wrapper');
+  if(!gallery)return;
+  const old=document.querySelector('#modalBody > .insta-video'), url=instagramUrlOf(animal);
+  if(old && old.dataset.url===url)return; // 목록이 새로 와도 같은 게시물의 재생/스크롤은 끊지 않는다.
+  old?.remove();
+  if(url)gallery.insertAdjacentHTML('afterend',instaSectionHtml(animal));
+}
+function instagramQuote(url) {
+  return `<blockquote class="instagram-media" data-instgrm-permalink="${escapeHtml(url)}" data-instgrm-version="14">게시물을 불러오는 중…</blockquote>`;
+}
+function instagramPlayer(url) {
+  // 외부 SDK를 보호소 페이지에 직접 실행하면 같은 탭의 관리자 세션도 읽을 수 있다.
+  // data: 문서는 고유 출처이고, 그 안의 실제 Instagram 프레임은 자기 출처로 재생된다.
+  const frame=document.createElement('iframe');
+  frame.className='insta-player';frame.title='인스타그램 게시물 재생';frame.referrerPolicy='no-referrer';
+  frame.allow='fullscreen; picture-in-picture; encrypted-media';frame.allowFullscreen=true;
+  frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox');
+  const doc=`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer">
+    <meta name="viewport" content="width=device-width, initial-scale=1"><style>
+    *{box-sizing:border-box}html,body{margin:0;padding:0;font:14px system-ui,sans-serif;color:#475569}main{max-width:540px;margin:0 auto}
+    main .instagram-media{width:100%!important;min-width:0!important;max-width:540px!important;margin:0!important}
+    main iframe{border:0;display:block}blockquote{padding:16px}
+    </style></head><body><main id="post">${instagramQuote(url)}</main>
+    <script>
+    (function(){
+      var post=document.getElementById('post');
+      function send(state,height){parent.postMessage({channel:'carelink-instagram',state:state,height:height},'*');}
+      var lastHeight=0;
+      function measure(){var player=post.querySelector('iframe');if(player && player.clientHeight>0){var h=Math.ceil(player.getBoundingClientRect().height);if(h!==lastHeight){lastHeight=h;send('size',h);}}}
+      if(window.ResizeObserver)new ResizeObserver(measure).observe(post);
+      new MutationObserver(measure).observe(post,{subtree:true,childList:true,attributes:true});
+      function process(){try{if(!window.instgrm || typeof window.instgrm.Embeds.process!=='function')throw Error();window.instgrm.Embeds.process();measure();}catch(_){send('error');}}
+      if(window.instgrm && window.instgrm.Embeds)process();else{
+        var script=document.createElement('script');script.async=true;script.referrerPolicy='no-referrer';
+        script.onload=process;script.onerror=function(){send('error');};script.src='https://www.instagram.com/embed.js';document.body.appendChild(script);
+      }
+    })();<\/script></body></html>`;
+  frame.src='data:text/html;charset=utf-8,'+encodeURIComponent(doc);
+  return frame;
+}
+function showInstaFailure(section) {
+  if(!section.isConnected)return;
+  const retry=document.createElement('button');
+  retry.type='button';retry.className='insta-play-btn';retry.dataset.url=section.dataset.url;retry.textContent='▶ 다시 시도';
+  section.querySelector('.insta-embed-box').replaceChildren(retry);
+  section.querySelector('.insta-play-note').textContent='미리보기를 불러오지 못했습니다. 다시 시도하거나 아래 링크에서 열어 주세요.';
+}
+function mountInstaPlayer(section,url) {
+  const box=section.querySelector('.insta-embed-box');
+  section.querySelector('.insta-play-note').textContent='재생되지 않거나 비공개 게시물이면 아래 링크로 확인해 주세요.';
+  // 호스트가 SDK를 이미 제공하는 경우에는 중복 로딩하지 않고, 지금 선택한 게시물만 새로 넣는다.
+  let frame=null;
+  if(typeof window.instgrm?.Embeds?.process==='function') {
+    box.innerHTML=instagramQuote(url);
+    try { window.instgrm.Embeds.process(); }
+    catch (_) { showInstaFailure(section); return; }
+  }else{
+    frame=instagramPlayer(url);box.replaceChildren(frame);
+  }
+  // SDK의 처음 높이는 0(테두리만 2px)이다. 중첩 프레임/스크립트가 차단되더라도 복구한다.
+  setTimeout(()=>{
+    if(!section.isConnected || (frame && !frame.isConnected))return;
+    if(frame ? !frame.dataset.measured : !(box.querySelector('iframe')?.clientHeight>0))showInstaFailure(section);
+  },15000);
+}
+function onInstaClick(event) {
+  if(!isModalOpen || !activeAnimal)return;
+  const id=getDesertionNo(activeAnimal) || activeAnimal.noticeNo || null;
+  const btn=event.target.closest?.('.insta-play-btn');
+  if(btn){
+    const url=instagramUrlOf(activeAnimal),section=btn.closest('.insta-video');
+    if(!url || !section || section.dataset.url!==url || btn.dataset.url!==url)return;
+    track('video_open',id); // 재생 성공이 아니라 명시적인 버튼 선택을 센다.
+    mountInstaPlayer(section,url);return;
+  }
+  const link=event.target.closest?.('a.insta-direct-link, a.insta-brand-link');
+  if(link)track('insta_click',id,{kind:link.classList.contains('insta-direct-link')?'post':'account'});
+}
+function onInstaPlayerMessage(event) {
+  if(!isModalOpen || event.origin!=='null' || event.data?.channel!=='carelink-instagram')return;
+  const frame=document.querySelector('#modalBody .insta-player');
+  // 닫았거나 교체한 개체/프레임의 늦은 메시지는 무시한다. 외부 문자열/HTML은 받아 표시하지 않는다.
+  if(!frame || event.source!==frame.contentWindow)return;
+  if(event.data.state==='size' && Number.isFinite(event.data.height)){
+    frame.dataset.measured='1';
+    frame.style.height=Math.min(1600,Math.max(240,Math.ceil(event.data.height)))+'px';
+  }else if(event.data.state==='error'){
+    showInstaFailure(frame.closest('.insta-video'));
+  }
+}
+
+function renderModalContent(animal, kindTitle, stateText, noticePeriod, galleryOnly=false) {
   const images = modalImages;
   const safeIndex = Math.min(modalImageIndex, Math.max(0, images.length - 1));
   modalImageIndex = safeIndex;
@@ -1231,7 +1348,10 @@ function renderModalContent(animal, kindTitle, stateText, noticePeriod) {
     galleryHtml = `<div class="modal-gallery-wrapper"><div class="modal-main-image-box"><img src="${PLACEHOLDER_SVG}" alt="사진 미등록"></div></div>`;
   }
 
-  document.getElementById('modalBody').innerHTML = galleryHtml + modalDetailHtml(animal,kindTitle,stateText,noticePeriod);
+  const body=document.getElementById('modalBody');
+  const old=galleryOnly && body.querySelector('.modal-gallery-wrapper');
+  if(old)old.outerHTML=galleryHtml;
+  else body.innerHTML=galleryHtml + instaSectionHtml(animal) + modalDetailHtml(animal,kindTitle,stateText,noticePeriod);
   setupModalImageNavigation();
 }
 
@@ -1334,6 +1454,7 @@ function requestCloseModal() {
 }
 
 function closeModal(options = {}) {
+  document.querySelector('#modalBody > .insta-video')?.remove(); // 숨기기만 하면 소리/외부 위젯이 계속 실행될 수 있다.
   document.getElementById('modal').style.display = 'none';
   document.body.style.overflow = '';
   isModalOpen = false;

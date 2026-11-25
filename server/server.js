@@ -8,6 +8,7 @@ const pkg = require('../package.json');
 const dataPath = require('../lib/dataPath');
 const { createAnimalSync, apiPhotoCount, filterAnimals, CRAWL_DELAY_MS } = require('../services/animalSync');
 const { registerQrRoutes } = require('./qrRoutes');
+const { normalize: normalizeInstagramUrl } = require('../js/instagramPost');
 const { shareFromCode, QrError } = require('../services/qrPhoto');
 const https = require('https');
 const http = require('http');
@@ -143,8 +144,8 @@ async function persistAnimal(key) {
   try {
     if (mongoColl) {
       if (rec) {
-        // QR 생성/자리 저장이 동시에 진행돼도 케어 저장이 그 두 필드를 되돌리지 않는다.
-        const {qrMade,qrSlot,...care}=rec;
+        // 독립적으로 저장한 QR 필드/게시물 주소를 케어 저장이 이전 값으로 되돌리지 않는다.
+        const {qrMade,qrSlot,instagramUrl,...care}=rec;
         await mongoColl.updateOne({ _id:key }, { $set:care }, { upsert:true });
       }
       else await mongoColl.deleteOne({ _id: key });
@@ -156,19 +157,21 @@ async function persistAnimal(key) {
   }
 }
 
-// QR은 다운로드 직전 저장 성공을 확인한다. 생성 시 qrSlot을 추정/초기화하지 않는다.
+// 관리자가 지정한 필드만 같은 개체 문서에 쓴다. 원시 요청 본문은 넘기지 않는다.
+async function writeAnimalFields(key, fields) {
+  if (mongoColl) {
+    await mongoColl.updateOne({_id:key},{$set:fields,$setOnInsert:{status:null,statusUpdatedAt:null,logs:[]}},{upsert:true});
+    Object.assign(getRec(key,true),fields);
+  } else {
+    const previous=getRec(key);
+    db.animals[key]={...(previous || {status:null,statusUpdatedAt:null,logs:[]}),...fields};
+    try { writeLocalDB(); }
+    catch (err) { if(previous)db.animals[key]=previous;else delete db.animals[key]; throw err; }
+  }
+}
 async function writeQrFields(key, fields) {
-  try {
-    if (mongoColl) {
-      await mongoColl.updateOne({_id:key},{$set:fields,$setOnInsert:{status:null,statusUpdatedAt:null,logs:[]}},{upsert:true});
-      Object.assign(getRec(key,true),fields);
-    } else {
-      const previous=getRec(key);
-      db.animals[key]={...(previous || {status:null,statusUpdatedAt:null,logs:[]}),...fields};
-      try { writeLocalDB(); }
-      catch (err) { if(previous)db.animals[key]=previous;else delete db.animals[key]; throw err; }
-    }
-  } catch (_) { throw new QrError(503,'SAVE','QR 작업 기록을 저장하지 못했습니다. 저장소를 확인한 뒤 다시 시도해 주세요.'); }
+  try { await writeAnimalFields(key,fields); }
+  catch (_) { throw new QrError(503,'SAVE','QR 작업 기록을 저장하지 못했습니다. 저장소를 확인한 뒤 다시 시도해 주세요.'); }
 }
 
 // 보호중은 기존과 같은 null(오버레이 없음). adopting은 상담 단계로 표시한다.
@@ -219,6 +222,7 @@ function enrichItem(item) {
     ...item,
     customStatus: rec?.status || null,          // null | 'foster' | 'adopting' | 'confirmed'
     statusUpdatedAt: rec?.statusUpdatedAt || null,
+    instagramUrl: normalizeInstagramUrl(rec?.instagramUrl),
     logCount: logs.length,
     lastLog: last ? { date: last.date, type: last.type, title: last.title } : null,
     // 🔗 공유 주소 보조(P0-2/P1-3) — 화면에서 바로 쓸 수 있게 서버가 계산해 둔다
@@ -340,6 +344,7 @@ async function buildStats(days) {
   const byEvent = {};
   const perAnimal = new Map();
   const filterUse = new Map();
+  const instaLinks = {post:0,account:0};
   let dwellSum = 0, dwellCount = 0;
 
   const animalOf = (id) => {
@@ -356,6 +361,7 @@ async function buildStats(days) {
     if(!day || !Number.isSafeInteger(n) || n<1) continue;
     byEvent[ev] = (byEvent[ev] || 0) + n;
     const meta=e.meta||{};
+    if(ev==='insta_click' && (meta.kind==='post' || meta.kind==='account')) instaLinks[meta.kind]+=n;
     if (['page_view','detail_open','link_open','adopt_inquiry','reserve_click','photo_swipe'].includes(ev)) day[ev]+=n;
     if(ev==='link_open') day[meta.path==='link'?'link_from_link':'link_from_list']+=n;
     if(ev==='link_share'||ev==='link_copy') day.share+=n;
@@ -373,6 +379,8 @@ async function buildStats(days) {
     detail_open: byEvent.detail_open || 0,
     link_open: byEvent.link_open || 0,
     photo_swipe: byEvent.photo_swipe || 0,
+    video_open: byEvent.video_open || 0,
+    insta_click: byEvent.insta_click || 0, insta_post: instaLinks.post, insta_account: instaLinks.account,
     adopt_inquiry: byEvent.adopt_inquiry || 0,
     reserve_click: byEvent.reserve_click || 0,
     share: (byEvent.link_share || 0) + (byEvent.link_copy || 0),
@@ -665,6 +673,21 @@ app.get('/sitemap.xml', async (req, res) => {
 app.get('/api/animals/:key/logs', (req, res) => {
   const rec = getRec(String(req.params.key).trim());
   res.json({ status: rec?.status || null, logs: rec?.logs || [] });
+});
+
+// 관리자만 게시물 연결/교체/해제. 잘못된 입력과 명시적인 해제를 구분한다.
+app.put('/api/admin/animals/:key/instagram', requireAdmin, async (req,res) => {
+  res.set('Cache-Control','private, no-store');
+  const key=String(req.params.key).trim(), raw=req.body?.instagramUrl;
+  const clear=raw===null || (typeof raw==='string' && !raw.trim());
+  const url=normalizeInstagramUrl(raw);
+  if(!clear && !url) return res.status(400).json({error:'https://www.instagram.com/p/… 또는 /reel/… 형식의 게시물 주소를 입력해 주세요.'});
+  const animal=animalSync.findByShareId(key);
+  if(!animal || animalKeyOf(animal)!==key) return res.status(404).json({error:'목록에서 해당 개체를 찾지 못했습니다. 새로고침해 주세요.'});
+  try {
+    if((getRec(key)?.instagramUrl ?? null)!==url) await writeAnimalFields(key,{instagramUrl:url});
+    res.json({ok:true,instagramUrl:url});
+  } catch (_) { res.status(503).json({error:'게시물 주소를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.'}); }
 });
 
 // ---- 관리자: 상태 변경 ----

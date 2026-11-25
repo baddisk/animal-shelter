@@ -605,3 +605,20 @@ body {
 .qr-error,.qr-warning,.qr-feedback { margin-top: 8px; font-size: .84rem; line-height: 1.5; }
 .qr-error,.qr-warning { color: #9A3412; }.qr-feedback { color: #075985; }
 #qrSection button:disabled,#qrBatch:disabled { opacity: .6; cursor: not-allowed; }
+
+/* 개체별 게시물: 클릭 전 외부 이미지·글꼴 없이 로컬 UI만 표시한다. */
+.card-insta-mark { position:absolute; right:8px; bottom:8px; display:grid; place-items:center; width:26px; height:26px; padding-left:2px; border:1px solid #fff; border-radius:50%; background:#312942; color:#fff; font-size:.78rem; pointer-events:none; }
+.insta-video { padding:16px clamp(14px,4vw,22px); background:#fffaf5; border-bottom:1px solid #e5e7eb; }
+.insta-video h3 { font-size:1rem; color:#412e25; margin:0 0 9px; }
+.insta-embed-box { width:100%; max-width:540px; margin:0 auto; }
+.insta-embed-box > .instagram-media { width:100%!important; min-width:0!important; margin:0!important; }
+.insta-play-btn { width:100%; min-height:44px; padding:10px 16px; border:1px solid #7c3e47; border-radius:10px; color:#fff; background:#793948; font:inherit; font-weight:700; cursor:pointer; }
+.insta-play-btn:hover { background:#63303b; }
+.insta-play-note { margin:9px 0 3px; color:#475569; font-size:.8rem; line-height:1.5; }
+.insta-direct-link { display:inline-block; padding:5px 0; font-size:.87rem; font-weight:700; color:#813649; text-decoration:underline; text-underline-offset:3px; }
+.insta-player { display:block; width:100%; height:clamp(360px,68vh,640px); border:0; border-radius:8px; background:#fff; }
+#instagramEditor { margin-top:18px; border-top:1px solid var(--border); }
+#instagramEditor input { box-sizing:border-box; width:100%; padding:10px; border:1.5px solid var(--border); border-radius:8px; font:inherit; }
+#instagramEditor input[aria-invalid="true"] { border-color:#b91c1c; }
+#instagramEditor .btn-primary { margin:8px 6px 0 0; }
+#instagramFeedback { font-size:.84rem; line-height:1.5; color:#334155; }

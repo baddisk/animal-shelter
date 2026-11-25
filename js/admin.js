@@ -141,6 +141,7 @@ async function loadAnimals() {
     const data = await api('/api/admin/animals', {cache:'no-store'}); // QR 생성/자리 기록은 인증한 관리자에게만 제공
     if (request !== adminListRequest) return;
     animals = data.items || [];
+    refreshInstagramField();
   } catch (_) {
     if (request !== adminListRequest) return;
     if (!animals.length) listEl.textContent = '목록을 준비 중입니다. 잠시 후 다시 확인해 주세요.';
@@ -184,6 +185,7 @@ function selectAnimalBy(key) {
 }
 
 async function selectAnimal(a) {
+  if (!selected || getKey(selected) !== getKey(a)) instagramDraft = null;
   selected = a;
   record = null;
   editingLogId = null;
@@ -259,6 +261,7 @@ function renderPanel(opt = {}) {
       ${editingLogId ? '<button class="btn-ghost" onclick="cancelEdit()">수정 취소</button>' : ''}
     </div>
     <section id="qrSection" aria-labelledby="qrHeading"></section>
+    ${instagramEditorHtml(a, opt.loading)}
   `;
   window.adminQr?.refresh();
 }
@@ -277,6 +280,69 @@ function renderLogList(logs) {
         <button class="icon-btn" title="삭제" onclick="deleteLog('${l.id}')"><i class="fas fa-trash"></i></button>
       </div>
     </div>`).join('');
+}
+
+// ---------- 개체별 인스타그램 게시물 ----------
+let instagramDraft = null; // 현재 편집 중인 칸만 메모리에 유지. 다른 개체/저장소로 복사하지 않는다.
+const instagramSaving = new Set();
+function instagramEditorHtml(a,loading) {
+  const key=getKey(a), latest=animals.find(row=>getKey(row)===key) || a;
+  const value=instagramDraft?.key===key ? instagramDraft.value : latest.instagramUrl || '';
+  const disabled=loading || instagramSaving.has(key) ? 'disabled' : '';
+  return `<form id="instagramEditor" data-key="${escapeHtml(key)}" onsubmit="saveInstagramPost(event)" novalidate>
+    <h3><span aria-hidden="true">⑤ </span><label for="instagramUrl">인스타그램 게시물 주소</label></h3>
+    <div class="admin-field"><input type="url" id="instagramUrl" name="instagramUrl" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="4096"
+      placeholder="https://www.instagram.com/reel/…/" value="${escapeHtml(value)}" aria-describedby="instagramHelp instagramFeedback" oninput="editInstagramPost(this)" ${disabled}></div>
+    <p class="admin-hint" id="instagramHelp">공개 게시물(/p/) 또는 릴스(/reel/) 주소 하나를 붙여 넣으세요. ? 뒤는 제외됩니다. 연결을 해제하려면 주소를 지우고 저장하세요.</p>
+    <button type="submit" class="btn-primary" ${disabled}>게시물 주소 저장</button>
+    <span id="instagramFeedback" role="status" aria-live="polite"></span>
+  </form>`;
+}
+// 목록만 다시 읽었을 때에도 다른 관리자가 바꾼 주소는 반영하되 작성 중인 입력은 보존한다.
+function refreshInstagramField() {
+  const form=document.getElementById('instagramEditor');
+  if(!form || !selected)return;
+  const key=form.dataset.key, latest=animals.find(a=>getKey(a)===key);
+  if(!latest || key!==getKey(selected) || instagramDraft?.key===key || instagramSaving.has(key))return;
+  selected.instagramUrl=latest.instagramUrl;
+  const field=form.elements.instagramUrl, value=latest.instagramUrl || '';
+  if(field.value!==value){field.value=value;form.querySelector('#instagramFeedback').textContent='';}
+}
+function editInstagramPost(input) {
+  instagramDraft={key:input.form.dataset.key,value:input.value};
+  input.removeAttribute('aria-invalid');document.getElementById('instagramFeedback').textContent='';
+}
+async function saveInstagramPost(event) {
+  event.preventDefault();
+  const form=event.currentTarget, key=form.dataset.key, input=form.elements.instagramUrl;
+  if(!selected || getKey(selected)!==key || input.disabled || instagramSaving.has(key))return;
+  const raw=input.value.trim(), url=window.CarelinkInstagram?.normalize(raw) || null;
+  if(raw && !url){
+    input.setAttribute('aria-invalid','true');
+    document.getElementById('instagramFeedback').textContent='저장하지 않았습니다. https://www.instagram.com/p/… 또는 /reel/… 주소인지 확인해 주세요.';
+    input.focus();return;
+  }
+  instagramSaving.add(key);input.disabled=true;form.querySelector('button').disabled=true;
+  document.getElementById('instagramFeedback').textContent='저장 중…';input.removeAttribute('aria-invalid');
+  let message, saved=false;
+  try {
+    const data=await api(`/api/admin/animals/${encodeURIComponent(key)}/instagram`,{method:'PUT',body:JSON.stringify({instagramUrl:url})});
+    const row=animals.find(a=>getKey(a)===key);if(row)row.instagramUrl=data.instagramUrl;
+    if(selected && getKey(selected)===key)selected.instagramUrl=data.instagramUrl;
+    if(instagramDraft?.key===key)instagramDraft=null;
+    saved=true;message=url?'게시물 주소를 저장했습니다.':'게시물 연결을 해제했습니다.';
+    await loadAnimals(); // 진행 중이던 오래된 목록 응답보다 새 저장값이 우선한다.
+  } catch(err){message=err.message || '저장하지 못했습니다. 다시 시도해 주세요.';}
+  finally {
+    instagramSaving.delete(key);
+    // 저장을 기다리는 동안 개체를 바꿨어도 새 개체의 입력칸/안내 문구를 건드리지 않는다.
+    const now=document.getElementById('instagramEditor');
+    if(now?.dataset.key===key){
+      const field=now.elements.instagramUrl;field.disabled=false;now.querySelector('button').disabled=false;
+      if(saved)field.value=url || '';
+      now.querySelector('#instagramFeedback').textContent=message;
+    }
+  }
 }
 
 // ---------- 상태 저장 ----------
@@ -459,6 +525,7 @@ function renderStats(s) {
     { icon: '🤝', label: '입양 문의', value: fmtNum(t.adopt_inquiry), sub: `열람 대비 ${pctOf(t.adopt_inquiry, t.detail_open)}%` },
     { icon: '📤', label: '공유 · 복사', value: fmtNum(t.share), sub: `사진 탐색 ${fmtNum(t.photo_swipe)}회` },
     { icon: '⏱️', label: '평균 체류', value: fmtDuration(t.avg_dwell_sec), sub: `누적 ${fmtDuration(t.total_dwell_sec)}` },
+    { icon: '▶', label: '영상 보기 선택', value: fmtNum(t.video_open), sub: `게시물 링크 ${fmtNum(t.insta_post)}건 · 계정 배너 ${fmtNum(t.insta_account)}건` },
     { icon: '📄', label: '페이지 조회', value: fmtNum(t.page_view), sub: `전체 이벤트 ${fmtNum(t.events)}건` }
   ];
 

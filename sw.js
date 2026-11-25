@@ -12,6 +12,7 @@ const PRECACHE = [
   '/',
   '/index.html',
   `/css/style.css?v=${VERSION}`,
+  `/js/instagramPost.js?v=${VERSION}`,
   `/js/app.js?v=${VERSION}`,
   '/logo.svg',
   `/favicon.png?v=${VERSION}`,
