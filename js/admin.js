@@ -9,6 +9,7 @@ let animals = [];
 let selected = null;      // 선택된 개체(API 데이터 + customStatus)
 let record = null;        // { status, logs }
 let recordRequest = 0;    // 이전 개체의 늦은 응답이 현재 선택을 되돌리지 않게 한다.
+const statusBusy = new Set(); // 목록과 상세가 같은 개체를 중복 저장하지 않도록 공유
 let editingLogId = null;  // 수정 중인 로그 id
 
 // 표시 순서이기도 하다. none은 서버의 null, 기존 adopting은 상담중 그대로 호환.
@@ -22,6 +23,7 @@ const LOG_TYPES = {
 
 // ---------- 공통 ----------
 async function api(path, opts = {}) {
+  const session=token;
   const res = await fetch(path, {
     ...opts,
     headers: {
@@ -33,8 +35,8 @@ async function api(path, opts = {}) {
   let data = {};
   try { data = await res.json(); } catch (_) {}
   if (!res.ok) {
-    if (res.status === 401) { token = ''; sessionStorage.removeItem(TOKEN_KEY); showLogin(); }
-    throw new Error(data.error || '요청 실패');
+    if (res.status === 401 && token===session) { token = ''; sessionStorage.removeItem(TOKEN_KEY); showLogin(); }
+    throw Object.assign(new Error(data.error || '요청 실패'),{status:res.status});
   }
   return data;
 }
@@ -68,6 +70,11 @@ function formatDate8(d) {
 
 // ---------- 로그인/로그아웃 ----------
 function showLogin() {
+  ++adminListRequest;++recordRequest;animals=[];selected=null;record=null;editingLogId=null;instagramDraft=null;
+  adminListReady=false;adminListError='';adminListDay='';statusBusy.clear();
+  window.adminOps?.reset();
+  document.getElementById('adminList').textContent='개체 목록을 불러오는 중…';
+  document.getElementById('adminPanel').textContent='목록에서 개체를 선택하세요.';
   document.getElementById('loginView').style.display = 'block';
   document.getElementById('adminView').style.display = 'none';
 }
@@ -132,22 +139,28 @@ async function syncNow() {
   finally { syncingNow = false; btn.disabled = false; btn.textContent = '지금 동기화'; loadSyncStatus(); }
 }
 setInterval(() => { if (!document.hidden && token) loadSyncStatus(); }, 60_000);
-let adminListRequest = 0;
+let adminListRequest=0, adminListReady=false, adminListError='', adminListDay='';
 async function loadAnimals() {
-  const request = ++adminListRequest;
+  const request=++adminListRequest, session=token;
+  if(!session)return;
   const listEl = document.getElementById('adminList');
   // 보호 상태·케어 기록 저장 직후에도 60초 된 HTTP 캐시 대신 최신 메모리 목록을 받는다.
   try {
     const data = await api('/api/admin/animals', {cache:'no-store'}); // QR 생성/자리 기록은 인증한 관리자에게만 제공
-    if (request !== adminListRequest) return;
-    animals = data.items || [];
+    if (request !== adminListRequest || session!==token) return;
+    animals = data.items || [];adminListReady=true;adminListError='';adminListDay=data.asOf || '';
     refreshInstagramField();
   } catch (_) {
-    if (request !== adminListRequest) return;
-    if (!animals.length) listEl.textContent = '목록을 준비 중입니다. 잠시 후 다시 확인해 주세요.';
-    return;
+    if (request !== adminListRequest || session!==token) return;
+    adminListError='최신 목록을 읽지 못했습니다. 잠시 후 다시 읽어 주세요.';
+    if(!adminListReady)listEl.textContent=adminListError;
+    else renderAnimalList();
+    window.adminOps?.render();return;
   }
-
+  renderAnimalList();window.adminOps?.render();
+}
+function renderAnimalList() {
+  const listEl=document.getElementById('adminList');
   const headerHtml = `
     <div class="admin-list-header">
       <span><i class="fas fa-list"></i> 보호중 개체 <b>${animals.length}</b>마리</span>
@@ -155,7 +168,7 @@ async function loadAnimals() {
     </div><div class="qr-batch-bar">
       <button type="button" id="qrBatch" class="btn-ghost" onclick="adminQr.batch()">공고 중 QR 미적용 일괄 받기 (ZIP)</button>
       <small>이 도구의 생성 기록 기준 · 한 번에 최대 20마리</small><small id="qrBatchStatus" role="status"></small>
-    </div>`;
+    </div><p class="quick-hint">상태 칩을 누르면 바로 저장됩니다. 입양진행중은 상세의 입양상담중입니다.</p>`;
 
   if (!animals.length) {
     listEl.innerHTML = headerHtml + '<div class="admin-list-empty">API에서 보호중인 개체를 찾지 못했습니다.<br>우측 상단 새로고침 버튼을 눌러보세요.</div>';
@@ -164,17 +177,16 @@ async function loadAnimals() {
 
   listEl.innerHTML = headerHtml + animals.map((a) => {
     const st = Object.prototype.hasOwnProperty.call(STATUS_LABEL, a.customStatus) ? a.customStatus : 'none';
-    return `
-      <div class="admin-animal-item ${selected && getKey(selected) === getKey(a) ? 'selected' : ''}" data-key="${getKey(a)}" onclick="selectAnimalBy('${getKey(a)}')">
-        <img src="${thumbUrl(a)}" alt="" onerror="this.style.visibility='hidden'">
-        <div class="admin-animal-meta">
-          <div class="nm">${a.noticeNo || getKey(a)}</div>
-          <div class="sub">${(a.kindFullNm || a.kindNm || '')} · ${a.happenPlace || ''}</div>
-          <div class="sub">기록 ${a.logCount || 0}건</div>
-        </div>
-        ${a.qrMade ? `<span class="qr-tick" title="QR 사진 생성됨${a.qrSlot ? ` · KAWIS ${Number(a.qrSlot)}번` : ' · 업로드 자리 미입력'}">QR ✓</span>` : ''}
+    const key=escapeHtml(getKey(a)),img=thumbUrl(a) || a.qrPhotos?.[0]?.thumb;
+    return `<div class="admin-animal-item ${selected && getKey(selected)===getKey(a)?'selected':''}" data-key="${key}">
+      <button type="button" class="admin-row-open" aria-label="${escapeHtml(a.noticeNo || getKey(a))} 상세 열기">
+        ${img?`<img src="${escapeHtml(img)}" alt="" loading="lazy" decoding="async" onerror="this.style.visibility='hidden'">`:'<span class="ops-no-thumb">사진 없음</span>'}
+        <span class="admin-animal-meta"><b class="nm">${escapeHtml(a.noticeNo || getKey(a))}</b>
+          <span class="sub">${escapeHtml(a.kindFullNm || a.kindNm || '')} · ${escapeHtml(a.happenPlace || '')}</span>
+          <span class="sub">기록 ${Number(a.logCount) || 0}건</span></span>
+        ${a.qrMade?`<span class="qr-tick" title="QR 사진 생성됨${a.qrSlot?' · KAWIS '+Number(a.qrSlot)+'번':' · 업로드 자리 미입력'}">QR ✓</span>`:''}
         <span class="status-dot ${st}">${STATUS_LABEL[st]}</span>
-      </div>`;
+      </button>${window.adminOps?.chips(a) || ''}</div>`;
   }).join('');
   window.adminQr?.refresh();
 }
@@ -228,10 +240,10 @@ function renderPanel(opt = {}) {
     </div>
     <p class="admin-hint" id="statusHint">상태가 바뀔 때만 케어 기록에 한 줄 남습니다. 입양확정을 선택해도 공공데이터의 공고 상태는 바뀌지 않습니다.</p>
     <div style="margin-top:10px;">
-      <button type="button" class="btn-primary" onclick="saveStatus(this)" ${opt.loading ? 'disabled' : ''}><i class="fas fa-save"></i> 상태 저장</button>
+      <button type="button" class="btn-primary" id="saveDetailStatus" onclick="saveStatus(this)" ${opt.loading || statusBusy.has(getKey(a)) ? 'disabled' : ''}><i class="fas fa-save"></i> 상태 저장</button>
     </div>
 
-    <h3>② 케어 기록 ${opt.loading ? '<i class="fas fa-circle-notch fa-spin" style="font-size:0.8rem;"></i>' : `(${(logs || []).length}건)`}</h3>
+    <h3 id="logHeading">② 케어 기록 ${opt.loading ? '<i class="fas fa-circle-notch fa-spin" style="font-size:0.8rem;"></i>' : `(${(logs || []).length}건)`}</h3>
     <div id="adminLogList">
       ${opt.loading ? '<p class="admin-hint">불러오는 중...</p>' : renderLogList(logs || [])}
     </div>
@@ -272,8 +284,8 @@ function renderLogList(logs) {
     <div class="admin-log-item">
       <div class="meta">
         <div class="d">${formatDate8(l.date)} · ${LOG_TYPES[l.type] || l.type}</div>
-        <div class="t">${l.title}</div>
-        ${l.content ? `<div class="c">${l.content}</div>` : ''}
+        <div class="t">${escapeHtml(l.title)}</div>
+        ${l.content ? `<div class="c">${escapeHtml(l.content)}</div>` : ''}
       </div>
       <div class="admin-log-actions">
         <button class="icon-btn edit" title="수정" onclick="startEditLog('${l.id}')"><i class="fas fa-pen"></i></button>
@@ -346,22 +358,40 @@ async function saveInstagramPost(event) {
 }
 
 // ---------- 상태 저장 ----------
-async function saveStatus(button) {
-  const animal = selected, input = document.querySelector('#statusRadios input:checked');
-  if (!animal || !input || input.disabled || button.disabled) return;
-  const val = input.value;
-  const status = val === 'none' ? null : val;
-  button.disabled = true;
+function saveStatus(button) {
+  const input=document.querySelector('#statusRadios input:checked');
+  if(selected && input && !input.disabled && !button.disabled)return saveAnimalStatus(selected,input.value,false);
+}
+// 상세를 열지 않고도 동일한 상태 API가 변경과 자동 로그 한 줄을 함께 저장한다.
+async function saveAnimalStatus(a,val,inline) {
+  const key=getKey(a), status=val==='none'?null:val, before=a.customStatus ?? null, session=token;
+  if(!session || statusBusy.has(key) || !Object.hasOwn(STATUS_LABEL,val))return;
+  if(inline && (before===status || val==='confirmed'))return;
+  if(inline && before==='confirmed' && !confirm('입양확정 표시를 '+STATUS_LABEL[val]+' 상태로 바꿀까요? 과거 케어 기록은 유지됩니다.'))return;
+  statusBusy.add(key);window.adminOps?.syncLocks(key);
   try {
-    await api(`/api/admin/animals/${encodeURIComponent(getKey(animal))}/status`, {
-      method: 'PUT', body: JSON.stringify({ status })
+    const {record:next}=await api(`/api/admin/animals/${encodeURIComponent(key)}/status`,{
+      method:'PUT',body:JSON.stringify({status,...(inline?{expectedStatus:before}:{})})
     });
-    toast(`상태 저장: ${STATUS_LABEL[val]}`);
-    logsCacheBust();
-    await Promise.all([loadAnimals(), selected === animal && refreshRecord()]);
-  } catch (e) {
-    toast('실패: ' + e.message);
-  } finally { button.disabled = false; }
+    if(token!==session)return;
+    const fields={customStatus:next.status ?? null,statusUpdatedAt:next.statusUpdatedAt ?? null,logCount:next.logs?.length || 0};
+    const row=animals.find(x=>getKey(x)===key);if(row)Object.assign(row,fields);
+    if(selected && getKey(selected)===key){
+      // 같은 개체라도 작성 중인 케어 메모/인스타 입력을 지우지 않고 상태와 이력만 교체한다.
+      ++recordRequest;Object.assign(selected,fields);replacePanelStatus(next);
+    }
+    logsCacheBust();toast('상태 저장: '+STATUS_LABEL[val]);await loadAnimals();
+  } catch (err) {
+    if(token!==session)return;
+    toast('저장하지 못했습니다: '+err.message);
+    if(err.status===409 || err.status===404){
+      await loadAnimals();
+      if(err.status===409 && token===session && selected && getKey(selected)===key){
+        // 목록과 이미 열려 있던 상세의 단계가 어긋난 채 남지 않는다. 작성 중인 로그는 보존한다.
+        try {await refreshRecord(true);}catch (_) {toast('최신 케어 기록을 읽지 못했습니다. 개체를 다시 열어 주세요.');}
+      }
+    }
+  } finally {if(token===session){statusBusy.delete(key);window.adminOps?.syncLocks(key);}}
 }
 
 // ---------- 로그 추가/수정/삭제 ----------
@@ -424,14 +454,21 @@ function logsCacheBust() {
   try { sessionStorage.setItem('shelter_logs_bust', String(Date.now())); } catch (_) {}
 }
 
-async function refreshRecord() {
+function replacePanelStatus(next) {
+  const ready=!!record;record={status:next.status ?? null,logs:next.logs || []};
+  selected.customStatus=record.status;
+  if(!ready){renderPanel();return;}
+  document.querySelectorAll('#statusRadios input').forEach(el=>el.checked=el.value===(record.status || 'none'));
+  document.getElementById('logHeading').textContent=`② 케어 기록 (${record.logs.length}건)`;
+  document.getElementById('adminLogList').innerHTML=renderLogList(record.logs);
+}
+async function refreshRecord(keepForm=false) {
   if (!selected) return;
   const n = ++recordRequest;
   try {
     const next = await api(`/api/animals/${encodeURIComponent(getKey(selected))}/logs`, { cache: 'no-store' });
     if (n !== recordRequest) return;
-    record = next;
-    renderPanel();
+    if(keepForm)replacePanelStatus(next);else {record=next;renderPanel();}
   } catch (e) { if (n === recordRequest) throw e; }
 }
 
@@ -444,15 +481,17 @@ let statsData = null;
 let statsLoaded = false;
 
 function switchTab(name) {
-  const care = name === 'care';
-  document.getElementById('tabCare').style.display = care ? 'grid' : 'none';
-  document.getElementById('tabStats').style.display = care ? 'none' : 'block';
-  document.getElementById('tabBtnCare').classList.toggle('active', care);
-  document.getElementById('tabBtnStats').classList.toggle('active', !care);
-  document.getElementById('adminTitle').textContent =
-    care ? '🐕 개체 상태 · 케어 기록 관리' : '📈 이용 통계';
-  try { sessionStorage.setItem('shelter_admin_tab', name); } catch (_) {}
-  if (!care && !statsLoaded) loadStats();
+  const tabs={care:['Care','🐕 개체 상태 · 케어 기록 관리'],ops:['Ops','관리자 운영 목록'],stats:['Stats','📈 이용 통계']};
+  if(!Object.hasOwn(tabs,name))return;
+  for(const [k,[id]] of Object.entries(tabs)){
+    const on=k===name, btn=document.getElementById('tabBtn'+id);
+    document.getElementById('tab'+id).style.display=on?(k==='care'?'grid':'block'):'none';
+    btn.classList.toggle('active',on);btn.setAttribute('aria-selected',String(on));
+  }
+  document.getElementById('adminTitle').textContent=tabs[name][1];
+  try { sessionStorage.setItem('shelter_admin_tab',name); } catch (_) {}
+  if(name==='stats' && !statsLoaded)loadStats();
+  if(name==='ops'){window.adminOps?.render();if(adminListReady || adminListError)loadAnimals();}
 }
 
 function setStatsDays(days) {
@@ -713,11 +752,12 @@ async function showAssetVersion() {
 }
 
 // ---------- 시작 ----------
+window.adminOps?.init();
 showAssetVersion();
 if (token) {
   showAdmin();
   // 새로고침해도 보던 탭을 유지한다
   try {
-    if (sessionStorage.getItem('shelter_admin_tab') === 'stats') switchTab('stats');
+    const tab=sessionStorage.getItem('shelter_admin_tab');if(tab==='ops' || tab==='stats')switchTab(tab);
   } catch (_) {}
 } else showLogin();

@@ -38,7 +38,10 @@ function registerQrRoutes({app,requireAdmin,dbReady,items,keyOf,adminItem,photos
     return {buffer,name:`${share}_QR.jpg`,fields:{qrMade:{at:new Date().toISOString(),url,ratio,verified}}};
   }
   const attachment=(res,type,name)=>res.set({'Content-Type':type,'Content-Disposition':`attachment; filename="${name}"`,'X-Filename':name});
-  app.get('/api/admin/animals',requireAdmin,route(async(_req,res)=>res.json({items:(await items()).map(adminItem)})));
+  app.get('/api/admin/animals',requireAdmin,route(async(_req,res)=>{
+    const rows=await items(), day=today(); // 전 행을 한 한국 날짜 기준으로 계산
+    res.json({asOf:day,items:rows.map(a=>adminItem(a,day))});
+  }));
   app.get('/api/admin/qr-photo/:desertionNo',requireAdmin,generation(async(req,res)=>{
     const {slot='1',pos='br',force='0',v}=req.query;
     if(typeof slot!=='string'||!/^([1-8])$/.test(slot)||!['br','bl'].includes(pos)||!['0','1'].includes(force)) throw fail(400,'OPTIONS','원본은 1~8번, 위치는 우하단 또는 좌하단을 선택해 주세요.');

@@ -17,6 +17,7 @@ if(opt.mockCareDB){
    if(name!=='animals'||!options?.upsert||!update.$set)throw Error('unexpected care fixture write');
    if(opt.rejectQrWrite && ('qrMade' in update.$set || 'qrSlot' in update.$set))throw Error('fixture QR store unavailable');
    if(opt.rejectInstagramWrite && 'instagramUrl' in update.$set)throw Error('fixture link store unavailable');
+   if(opt.rejectOpsWrite && ('photoNote' in update.$set || 'status' in update.$set))throw Error('fixture operations store unavailable');
    if(opt.traceAnimalPatches)(log.animalPatches ||= []).push(structuredClone(update.$set));
    const prev=docs.get(filter._id) || update.$setOnInsert || {};
    const saved={...prev,...structuredClone(update.$set),_id:filter._id};docs.set(filter._id,saved);

@@ -9,7 +9,7 @@ const dataPath = require('../lib/dataPath');
 const { createAnimalSync, apiPhotoCount, filterAnimals, CRAWL_DELAY_MS } = require('../services/animalSync');
 const { registerQrRoutes } = require('./qrRoutes');
 const { normalize: normalizeInstagramUrl } = require('../js/instagramPost');
-const { shareFromCode, QrError } = require('../services/qrPhoto');
+const { shareFromCode, inNotice, QrError } = require('../services/qrPhoto');
 const https = require('https');
 const http = require('http');
 
@@ -144,8 +144,8 @@ async function persistAnimal(key) {
   try {
     if (mongoColl) {
       if (rec) {
-        // 독립적으로 저장한 QR 필드/게시물 주소를 케어 저장이 이전 값으로 되돌리지 않는다.
-        const {qrMade,qrSlot,instagramUrl,...care}=rec;
+        // 독립 저장하는 관리자 메모·QR·게시물 필드는 케어 기록 저장으로 덮지 않는다.
+        const {qrMade,qrSlot,instagramUrl,photoNote,...care}=rec;
         await mongoColl.updateOne({ _id:key }, { $set:care }, { upsert:true });
       }
       else await mongoColl.deleteOne({ _id: key });
@@ -160,7 +160,10 @@ async function persistAnimal(key) {
 // 관리자가 지정한 필드만 같은 개체 문서에 쓴다. 원시 요청 본문은 넘기지 않는다.
 async function writeAnimalFields(key, fields) {
   if (mongoColl) {
-    await mongoColl.updateOne({_id:key},{$set:fields,$setOnInsert:{status:null,statusUpdatedAt:null,logs:[]}},{upsert:true});
+    // 상태 변경은 상태·시각·자동 로그를 한 번에 쓰고, 메모/QR 등은 해당 필드만 쓴다.
+    const defaults={status:null,statusUpdatedAt:null,logs:[]};
+    for(const field of Object.keys(fields))delete defaults[field];
+    await mongoColl.updateOne({_id:key},{$set:fields,...(Object.keys(defaults).length?{$setOnInsert:defaults}:{})},{upsert:true});
     Object.assign(getRec(key,true),fields);
   } else {
     const previous=getRec(key);
@@ -690,25 +693,54 @@ app.put('/api/admin/animals/:key/instagram', requireAdmin, async (req,res) => {
   } catch (_) { res.status(503).json({error:'게시물 주소를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.'}); }
 });
 
+// 촬영 메모는 공개 케어 로그가 아니다. 수정·빈 문자열로 지우기 모두 명시적 관리자 저장만 허용한다.
+app.put('/api/admin/animals/:key/photo-note',requireAdmin, async (req,res)=>{
+  res.set('Cache-Control','private, no-store');
+  const key=String(req.params.key).trim(), raw=req.body?.photoNote;
+  if(typeof raw!=='string' || raw.length>500)return res.status(400).json({error:'촬영 메모는 500자 이내의 글로 입력해 주세요.'});
+  const a=animalSync.findByShareId(key);
+  if(!a || animalKeyOf(a)!==key)return res.status(404).json({error:'보호중 목록에 없는 개체입니다. 목록을 다시 읽어 주세요.'});
+  const photoNote=raw.trim();
+  try {
+    if((getRec(key)?.photoNote ?? '')!==photoNote)await writeAnimalFields(key,{photoNote});
+    res.json({ok:true,photoNote});
+  } catch (_) {res.status(503).json({error:'촬영 메모를 저장하지 못했습니다. 저장소를 확인한 뒤 다시 시도해 주세요.'});}
+});
+
+// 같은 개체의 상태+자동 로그와 수동 로그 편집만 직렬화한다. 조회/다른 개체/독립 필드는 막지 않는다.
+const careWrites=new Map();
+function careEdit(handler){
+  return async (req,res,next)=>{
+    res.set('Cache-Control','private, no-store');
+    const key=String(req.params.key).trim();
+    const done=(careWrites.get(key) || Promise.resolve()).then(()=>handler(req,res)).catch(next);
+    careWrites.set(key,done);
+    try {await done;}finally{if(careWrites.get(key)===done)careWrites.delete(key);}
+  };
+}
 // ---- 관리자: 상태 변경 ----
-app.put('/api/admin/animals/:key/status', requireAdmin, async (req, res) => {
+app.put('/api/admin/animals/:key/status', requireAdmin, careEdit(async (req, res) => {
   const key = String(req.params.key).trim();
   if (!key) return res.status(400).json({ error: '개체 번호가 필요합니다.' });
   const status = req.body?.status; // 잘못된 입력이 기존 상태를 지우지 않도록 null만 해제로 인정
   const change = STATUS_CHANGES.get(status);
   if (!change) return res.status(400).json({ error: 'status는 null | foster | adopting | confirmed 이어야 합니다.' });
   const existing = getRec(key);
+  // 목록 칩은 화면에 보였던 상태도 보낸다. 다른 관리자가 확정 등으로 바꾼 값을 무심코 되돌리지 않는다.
+  if(Object.hasOwn(req.body,'expectedStatus')){
+    const a=animalSync.findByShareId(key);
+    if(!a || animalKeyOf(a)!==key)return res.status(404).json({error:'보호중 목록에서 개체를 찾지 못했습니다.'});
+    if((existing?.status ?? null)!==status && req.body.expectedStatus!==(existing?.status ?? null))
+      return res.status(409).json({error:'다른 곳에서 상태가 바뀌었습니다. 최신 상태를 확인한 뒤 다시 눌러 주세요.'});
+  }
   if ((existing?.status ?? null) === status) {
     // 같은 상태 재저장은 역사/날짜를 바꾸거나 빈 DB 레코드를 만들지 않는다.
     return res.json({ ok: true, record: existing || { status: null, statusUpdatedAt: null, logs: [] } });
   }
-  const rec = existing || getRec(key, true);
-  rec.status = status;
-  rec.statusUpdatedAt = status ? new Date().toISOString() : null;
+  const rec = {status, statusUpdatedAt:status ? new Date().toISOString() : null, logs:[...(existing?.logs || [])]};
 
   // 명시적으로 바뀐 단계만 한 줄 기록한다(보호중 복귀 포함). 과거 기록은 다시 쓰지 않는다.
   if (req.body.addLog !== false) {
-    if (rec.logs == null) rec.logs = []; // 기록 배열이 없는 예전 상태 문서도 허용
     rec.logs.push({
       id: newId('l'),
       date: todayStr(),
@@ -719,12 +751,14 @@ app.put('/api/admin/animals/:key/status', requireAdmin, async (req, res) => {
     });
     sortLogs(rec);
   }
-  await persistAnimal(key);
-  res.json({ ok: true, record: rec });
-});
+  try {
+    await writeAnimalFields(key,rec);
+    res.json({ok:true,record:getRec(key)});
+  } catch (_) {res.status(503).json({error:'상태와 케어 기록을 저장하지 못했습니다. 다시 시도해 주세요.'});}
+}));
 
 // ---- 관리자: 로그 추가 / 수정 / 삭제 ----
-app.post('/api/admin/animals/:key/logs', requireAdmin, async (req, res) => {
+app.post('/api/admin/animals/:key/logs', requireAdmin, careEdit(async (req, res) => {
   const key = String(req.params.key).trim();
   const input = sanitizeLogInput(req.body);
   if (!input.date || !input.title) return res.status(400).json({ error: '날짜와 제목은 필수입니다.' });
@@ -734,9 +768,9 @@ app.post('/api/admin/animals/:key/logs', requireAdmin, async (req, res) => {
   sortLogs(rec);
   await persistAnimal(key);
   res.json({ ok: true, log: entry, logs: rec.logs });
-});
+}));
 
-app.put('/api/admin/animals/:key/logs/:logId', requireAdmin, async (req, res) => {
+app.put('/api/admin/animals/:key/logs/:logId', requireAdmin, careEdit(async (req, res) => {
   const key = String(req.params.key).trim();
   const rec = getRec(key);
   const log = rec?.logs.find((l) => l.id === req.params.logId);
@@ -747,16 +781,16 @@ app.put('/api/admin/animals/:key/logs/:logId', requireAdmin, async (req, res) =>
   sortLogs(rec);
   await persistAnimal(key);
   res.json({ ok: true, logs: rec.logs });
-});
+}));
 
-app.delete('/api/admin/animals/:key/logs/:logId', requireAdmin, async (req, res) => {
+app.delete('/api/admin/animals/:key/logs/:logId', requireAdmin, careEdit(async (req, res) => {
   const key = String(req.params.key).trim();
   const rec = getRec(key);
   if (!rec) return res.status(404).json({ error: '개체 기록이 없습니다.' });
   rec.logs = rec.logs.filter((l) => l.id !== req.params.logId);
   await persistAnimal(key);
   res.json({ ok: true, logs: rec.logs });
-});
+}));
 
 // ==============================================================
 // 🧪 데모(목) 모드 — .env에 API_KEY가 없으면 샘플 데이터로 동작
@@ -1272,9 +1306,9 @@ function qrPhotoKey(src) {
   }
   return filenameOf(src);
 }
-function qrPhotoUrls(a) {
+function qrPhotoUrls(a, extras=animalSync.getImages(animalKeyOf(a))) {
   const raw=Array.from({length:8},(_,i)=>a['popfile'+(i+1)]);
-  raw.push(...animalSync.getImages(animalKeyOf(a))); // 이미 수집된 T2 주소만, 여기서 크롤하지 않는다.
+  raw.push(...extras); // 이미 수집된 T2 주소만, 여기서 크롤하지 않는다.
   const unique=new Map();
   for(const src of raw){
     if(!src || !(qrLocalSource(src) || providerImageUrl(src)))continue;
@@ -1292,6 +1326,13 @@ async function qrOriginal(src) {
   const st=await fs.promises.stat(file);if(!st.isFile() || st.size>20*1024*1024)throw Error('invalid size');
   return fs.promises.readFile(file);
 }
+// 공공데이터 날짜는 한국의 달력 날짜이다. UTC 자정끼리 빼서 시차/시각 반올림 없이 센다.
+function calendarDate(value) {
+  const raw=String(value || '').replace(/[-.]/g,'');
+  if(!/^\d{8}$/.test(raw))return null;
+  const iso=raw.slice(0,4)+'-'+raw.slice(4,6)+'-'+raw.slice(6), ms=Date.parse(iso+'T00:00:00Z');
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0,10)===iso ? {raw,ms} : null;
+}
 registerQrRoutes({app,requireAdmin,dbReady,getRec,keyOf:animalKeyOf,writeFields:writeQrFields,original:qrOriginal,photos:qrPhotoUrls,sourceKey:qrSourceKey,
   today:()=>todayStr().replace(/-/g,''),
   items:async()=>{
@@ -1299,10 +1340,16 @@ registerQrRoutes({app,requireAdmin,dbReady,getRec,keyOf:animalKeyOf,writeFields:
     const items=getAllAnimals();if(!items.length)throw new QrError(503,'LIST','목록을 준비 중입니다. 잠시 후 다시 시도해 주세요.');
     return items;
   },
-  adminItem:a=>{
-    const rec=getRec(animalKeyOf(a));
+  adminItem:(a,day)=>{
+    const key=animalKeyOf(a),rec=getRec(key),extras=animalSync.getImages(key);
+    const today=calendarDate(day),intake=calendarDate(a.happenDt),start=calendarDate(a.noticeSdt),end=calendarDate(a.noticeEdt);
+    // T5와 같은 공고 판정. 보호 기간은 접수 당일 0일, 날짜가 없거나 미래이면 미상이다.
+    const noticePhase=inNotice(a,day)?'open':end && end.raw<day?'ended':start && start.raw>day?'upcoming':'unknown';
     return {...enrichItem(a),qrMade:!!rec?.qrMade,qrSlot:rec?.qrSlot || null,
-      qrPhotos:qrPhotoUrls(a).slice(0,8).map(src=>({v:qrSourceKey(src),thumb:qrLocalSource(src)?src:'/api/image-proxy?url='+encodeURIComponent(src)+'&w=160'}))};
+      photoCount:Math.max(apiPhotoCount(a) || (a.popfile?1:0),extras.length),
+      photoNote:typeof rec?.photoNote==='string'?rec.photoNote:'', noticePhase, noticeEnd:end?.raw || null,
+      daysInCare:intake && today && intake.ms<=today.ms?(today.ms-intake.ms)/86400000:null,
+      qrPhotos:qrPhotoUrls(a,extras).slice(0,8).map(src=>({v:qrSourceKey(src),thumb:qrLocalSource(src)?src:'/api/image-proxy?url='+encodeURIComponent(src)+'&w=160'}))};
   }
 });
 app.get('/api/animals', async (req, res, next) => {

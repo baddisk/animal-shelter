@@ -45,6 +45,7 @@
       <button class="admin-tab active" id="tabBtnCare" role="tab" onclick="switchTab('care')">
         <i class="fas fa-notes-medical"></i> 개체 · 케어 기록
       </button>
+      <button class="admin-tab" id="tabBtnOps" role="tab" aria-controls="tabOps" onclick="switchTab('ops')">운영 목록</button>
       <button class="admin-tab" id="tabBtnStats" role="tab" onclick="switchTab('stats')">
         <i class="fas fa-chart-line"></i> 이용 통계
       </button>
@@ -63,7 +64,22 @@
       </div>
     </div>
 
-    <!-- 탭 2: 이용 통계 -->
+    <section id="tabOps" class="ops-panel" role="tabpanel" aria-labelledby="tabBtnOps" style="display:none;">
+      <header class="ops-header"><div><h2>관리자 운영 목록</h2><p id="opsAsOf">보호 중인 개체 기준</p></div>
+        <button type="button" class="btn-ghost" data-ops="reload">목록 다시 읽기</button></header>
+      <div class="ops-modes" role="group" aria-label="운영 목록 선택">
+        <button type="button" data-mode="photo" aria-pressed="true">■ 사진 보강 필요 <b id="opsPhotoCount">–</b></button>
+        <button type="button" data-mode="qr" aria-pressed="false">□ QR 미적용 · 공고 중 <b id="opsQrCount">–</b></button>
+      </div>
+      <h3 id="opsTitle">■ 사진 보강 필요</h3><p id="opsHint" class="ops-hint"></p>
+      <p id="opsWarning" role="status" hidden></p>
+      <div id="opsRows" aria-labelledby="opsTitle">개체 목록을 불러오는 중…</div>
+      <nav class="ops-pages" aria-label="운영 목록 페이지" hidden>
+        <button class="btn-ghost" type="button" data-page="prev">이전</button><span id="opsPageLabel"></span><button class="btn-ghost" type="button" data-page="next">다음</button>
+      </nav>
+    </section>
+
+    <!-- 이용 통계 -->
     <div id="tabStats" style="display:none;">
       <div class="stats-toolbar">
         <div class="stats-range" id="statsRange">
@@ -84,7 +100,7 @@
     </div>
   </div>
 
-  <div id="toast" class="admin-toast"></div>
+  <div id="toast" class="admin-toast" role="status"></div>
 
   <footer style="padding:12px 16px 20px; text-align:center;">
     <small id="adminVersion" style="font-size:0.75rem; color:#475569;">버전 __V__</small>
@@ -92,6 +108,7 @@
 
   <script src="/js/instagramPost.js?v=__V__"></script>
   <script src="/js/adminQr.js?v=__V__"></script>
+  <script src="/js/adminOps.js?v=__V__"></script>
   <script src="/js/admin.js?v=__V__"></script>
 </body>
 </html>
