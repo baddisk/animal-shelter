@@ -10,17 +10,22 @@ const item=(n,age,edt,num,extra={})=>({desertionNo:id(n),noticeNo:noteNo(n),proc
 const data=[item(1,50,4,2),item(2,40,0,1),item(3,30,1,3),item(4,100,-1,0),item(5,12,8,1,{noticeSdt:day(3)}),item(6,0,2,1),
   item(7,0,0,0,{processState:'공고중',noticeSdt:'',noticeEdt:'',happenDt:'20260230'}),item(8,20,2,3),item(9,1,-2,0,{desertionNo:'',popfile:url(9)})];
 const old={status:'foster',statusUpdatedAt:'2025-06-01T00:00:00Z',logs:[{id:'log1',title:'기존 이력',type:'care',date:'20250601'}],instagramUrl:'https://www.instagram.com/p/KeepPost/',photoNote:secret};
-async function site(t,opts={}){
+async function site(t,opts={},snapshotItems=data){
   const dir=await makeSite(),file=path.join(dir,'data/db.json');let s;
   t.after(async()=>{if(s)await s.close();await fs.rm(dir,{recursive:true,force:true});});
   await fs.writeFile(file,JSON.stringify({animals:{[id(1)]:old,[id(3)]:{status:null,logs:[],qrMade:{verified:true}},[id(6)]:{status:'confirmed',logs:[],qrSlot:2}}}));
-  await fs.mkdir(path.join(dir,'cache'));await fs.writeFile(path.join(dir,'cache/animals-snapshot.json'),JSON.stringify({syncedAt:new Date().toISOString(),items:data,extra:{[id(1)]:{images:[url(7),url(8)]},[id(2)]:{images:[url(7),url(8),url(9)]}}}));
+  await fs.mkdir(path.join(dir,'cache'));await fs.writeFile(path.join(dir,'cache/animals-snapshot.json'),JSON.stringify({syncedAt:new Date().toISOString(),items:snapshotItems,extra:{[id(1)]:{images:[url(7),url(8)]},[id(2)]:{images:[url(7),url(8),url(9)]}}}));
   const start=()=>boot(dir,{offline:true,...opts});s=await start();return {s,file,dir,async restart(){await s.close();s=await start();return s;}};
 }
 const req=(method,body,h={})=>({method,body:JSON.stringify(body),headers:{'Content-Type':'application/json',...h}});
 async function json(p,status=200){const r=await p,d=await r.json();assert.equal(r.status,status,JSON.stringify(d));return d;}
 async function login(s){return {Authorization:'Bearer '+(await json(s.req('/api/admin/login',req('POST',{password:s.password})))).token};}
 const list=(s,h)=>json(s.req('/api/admin/animals',{headers:h}));
+async function queueBuilder(){
+  const ctx={window:{},getKey:a=>a.desertionNo || a.noticeNo};
+  vm.runInNewContext(await fs.readFile(path.join(__dirname,'../js/adminOps.js'),'utf8'),ctx);
+  return ctx.window.adminOps.queues;
+}
 const put=(s,h,key,field,body,code)=>json(s.req('/api/admin/animals/'+encodeURIComponent(key)+'/'+field,req('PUT',body,h)),code);
 const logs=(s,k)=>json(s.req('/api/animals/'+encodeURIComponent(k)+'/logs'));
 
@@ -31,13 +36,13 @@ test('운영 목록 두 가지: API/크롤 장수의 최댓값(합집합 아님)
   assert.equal(a(1).photoCount,2);assert.equal(a(1).qrPhotos.length,4);assert.equal(a(2).photoCount,3);assert.equal(a(3).photoCount,3);
   assert.equal(a(1).daysInCare,50);assert.equal(a(6).daysInCare,0);assert.equal(a(7).daysInCare,null);assert.equal(a(9).photoCount,1);
   assert.equal(a(2).noticePhase,'open');assert.equal(a(4).noticePhase,'ended');assert.equal(a(5).noticePhase,'upcoming');assert.equal(a(7).noticeEnd,null);
-  const ctx={window:{},getKey:x=>x.desertionNo || x.noticeNo};vm.runInNewContext(await fs.readFile(path.join(__dirname,'../js/adminOps.js'),'utf8'),ctx);
-  const order=items.map(x=>x.noticeNo),q=ctx.window.adminOps.queues(items);assert.deepEqual(items.map(x=>x.noticeNo),order);
-  assert.deepEqual(Array.from(q.photo,x=>x.noticeNo),[4,1,5,9,6,7].map(noteNo));assert.deepEqual(Array.from(q.qr,x=>x.noticeNo),[2,8,1,7].map(noteNo));
+  const queues=await queueBuilder();
+  const order=items.map(x=>x.noticeNo),q=queues(items);assert.deepEqual(items.map(x=>x.noticeNo),order);
+  assert.deepEqual(Array.from(q.photo,x=>x.noticeNo),[4,1,5,9,6,7].map(noteNo));assert.deepEqual(Array.from(q.qr,x=>x.noticeNo),[9,4,2,8,1,5,7].map(noteNo));
   assert.equal(a(6).customStatus,'confirmed');assert.equal(a(1).photoNote,secret);assert.equal(a(2).photoNote,'');
   for(const u of ['/api/animals',`/api/animals/${id(1)}/logs`,`/a/${share(1)}`]){const text=await(await s.req(u)).text();assert(!text.includes(secret)&&!text.includes('photoNote'));}
   assert.deepEqual(await fs.readFile(file),before);assert.equal((await s.rpc('get')).detail.length,0,'조회는 상세 크롤링을 시작하지 않는다');
-  assert.deepEqual(ctx.window.adminOps.queues([]).photo,[]);
+  assert.deepEqual(queues([]).photo,[]);
 });
 test('촬영 메모: 인증·저장·수정·삭제·재시작·실패 시 원복, QR/게시물/케어 이력과 분리',async t=>{
   const f=await site(t);let {s}=f,h=await login(s);const key=id(1),before=await fs.readFile(f.file);
@@ -77,7 +82,23 @@ test('실제 목록 경로: 국가 종료 개체 제외, 보호소 입양확정�
   const rec=JSON.parse(await fs.readFile(path.join(dir,'data/db.json')));rec.animals[id(3)]={status:'confirmed',logs:[]};await fs.writeFile(path.join(dir,'data/db.json'),JSON.stringify(rec));
   const rows=[{processState:'종료(입양)'},{processState:'종료(반환)'},{noticeNo:'인천-강화-2026-09999'},{noticeNo:'인천-강화-2026-00001'}].map(a=>({...a,noticeSdt:day(0),noticeEdt:day(2)}));
   s=await boot(dir,{count:4,rows,qrExtras:'<html>추가 사진 없음</html>'});const auth=await login(s),d=await list(s,auth);assert.equal(d.items.length,2);
-  const ctx={window:{},getKey:a=>a.desertionNo};vm.runInNewContext(await fs.readFile(path.join(__dirname,'../js/adminOps.js'),'utf8'),ctx);const q=ctx.window.adminOps.queues(d.items);
+  const queues=await queueBuilder(),q=queues(d.items);
   for(const xs of [q.photo,q.qr])assert.deepEqual(Array.from(xs,x=>x.desertionNo),[id(4),id(3)]);
   assert.equal(q.photo[1].customStatus,'confirmed');assert.equal(q.photo[1].noticePhase,'open');assert.equal(q.photo[1].daysInCare,1);
+});
+
+test('공고 중 0마리여도 종료·예정·날짜 미상 보호 개체는 개별 QR 대상이다. 일괄 ZIP은 공고 중만 처리한다',async t=>{
+  const rows=[item(3,30,-3,1),item(6,40,-2,1),item(11,50,-8,3,{popfile1:'/img/ops.jpg'}),
+    item(12,3,8,1,{noticeSdt:day(1)}),item(13,10,0,0,{noticeSdt:'',noticeEdt:''})];
+  const {s,dir,file}=await site(t,{},rows),h=await login(s),queues=await queueBuilder();
+  const items=(await list(s,h)).items,ids=xs=>Array.from(xs,x=>x.desertionNo);
+  assert(!items.some(a=>a.noticePhase==='open'));assert.equal(items.find(a=>a.desertionNo===id(13)).noticePhase,'unknown');
+  assert.deepEqual(ids(queues(items).qr),[11,12,13].map(id)); // 3번: 생성됨, 6번: 업로드 자리 기록만 있음
+  const before=await fs.readFile(file),zip=await s.req('/api/admin/qr-photos.zip',{headers:h});
+  assert.equal(zip.status,200);const archive=Buffer.from(await zip.arrayBuffer());assert(archive.includes(Buffer.from('안내.txt')));assert(!archive.includes(Buffer.from('_QR.jpg')));
+  assert.deepEqual(await fs.readFile(file),before); // 빈 ZIP이 보호 중 전체 개체에 생성 기록을 남기지 않는다.
+  await fs.mkdir(path.join(dir,'img'));await require('sharp')({create:{width:1400,height:1000,channels:3,background:'#aacbb5'}}).jpeg().toFile(path.join(dir,'img/ops.jpg'));
+  const result=await s.req('/api/admin/qr-photo/'+id(11)+'?slot=1',{headers:h});assert.equal(result.status,200);assert.match(result.headers.get('content-type'),/image\/jpeg/);await result.arrayBuffer();
+  const next=(await list(s,h)).items, made=next.find(a=>a.desertionNo===id(11));assert(made.qrMade);assert.equal(made.qrSlot,null);
+  assert.deepEqual(ids(queues(next).qr),[12,13].map(id));
 });

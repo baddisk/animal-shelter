@@ -9,10 +9,10 @@ window.adminOps=(()=>{
   const byKey=key=>animals.find(a=>getKey(a)===key);
   const tie=(a,b)=>String(a.noticeNo || '').localeCompare(String(b.noticeNo || ''),'ko') || getKey(a).localeCompare(getKey(b));
   function queues(rows){
-    // 기존 보호·공고 중 스냅샷만 입력된다. 원본 순서를 바꾸지 않고 누락일은 마지막에 둔다.
+    // 입력은 인증된 현재 보호 목록이다. QR 개별 작업은 공고 기간과 무관하고, T5 일괄 ZIP은 별도다.
     return {
       photo:rows.filter(a=>Number.isInteger(a.photoCount) && a.photoCount<=2).sort((a,b)=>(b.daysInCare ?? -1)-(a.daysInCare ?? -1) || tie(a,b)),
-      qr:rows.filter(a=>a.noticePhase==='open' && !a.qrMade && !a.qrSlot).sort((a,b)=>(a.noticeEnd || '99999999').localeCompare(b.noticeEnd || '99999999') || tie(a,b))
+      qr:rows.filter(a=>!a.qrMade && !a.qrSlot).sort((a,b)=>(a.noticeEnd || '99999999').localeCompare(b.noticeEnd || '99999999') || tie(a,b))
     };
   }
   function chips(a){
@@ -46,14 +46,14 @@ window.adminOps=(()=>{
     root.querySelectorAll('[data-mode]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===mode)));
     el('opsAsOf').textContent=adminListDay?`${formatDate8(adminListDay)} 한국 날짜 · 보호 중인 개체 기준`:'보호 중인 개체 기준';
     el('opsPhotoCount').textContent=adminListReady?q.photo.length:'–';el('opsQrCount').textContent=adminListReady?q.qr.length:'–';
-    el('opsTitle').textContent=mode==='photo'?'■ 사진 보강 필요':'□ QR 미적용 · 공고 중';
-    el('opsHint').textContent=mode==='photo'?'API와 수집된 사진 중 많은 쪽이 2장 이하인 개체입니다. 접수일부터 오래 보호한 순이며 당일은 0일입니다.':'공고 기간에 있고 QR 생성·업로드 자리 기록이 없는 개체입니다. 공고 종료일이 가까운 순입니다.';
+    el('opsTitle').textContent=mode==='photo'?'■ 사진 보강 필요':'□ QR 미적용 · 보호 중 전체';
+    el('opsHint').textContent=mode==='photo'?'API와 수집된 사진 중 많은 쪽이 2장 이하인 개체입니다. 접수일부터 오래 보호한 순이며 당일은 0일입니다.':'공고 기간에 관계없이 관리자 보호 목록에서 QR 생성 기록과 KAWIS 업로드 자리 기록이 모두 없는 개체를 표시합니다. 공고 종료일이 이른 순이며 날짜 미상은 마지막입니다. 일괄 ZIP은 공고 중인 개체만 최대 20마리입니다.';
     el('opsWarning').hidden=!adminListError;el('opsWarning').textContent=adminListError;
     const box=el('opsRows'), active=document.activeElement;
     // 다른 줄의 저장 응답/목록 갱신이 와도 타이핑 중인 메모와 커서를 빼앗지 않는다.
     const focused=box.contains(active) && active.name==='photoNote'?{key:active.closest('[data-key]').dataset.key,from:active.selectionStart,to:active.selectionEnd}:null;
     if(!adminListReady)box.textContent=adminListError?'목록을 다시 읽어 주세요.':'개체 목록을 불러오는 중…';
-    else if(!list.length)box.innerHTML=`<p class="admin-list-empty">${mode==='photo'?'사진 보강이 필요한 개체가 없습니다.':'공고 중 QR 미적용 개체가 없습니다.'}</p>`;
+    else if(!list.length)box.innerHTML=`<p class="admin-list-empty">${mode==='photo'?'사진 보강이 필요한 개체가 없습니다.':'현재 보호 목록에 QR 미적용 개체가 없습니다.'}</p>`;
     else box.innerHTML=list.slice((page-1)*perPage,page*perPage).map(rowHtml).join('');
     if(focused){const field=box.querySelector(`[data-key="${CSS.escape(focused.key)}"] textarea`);if(field && !field.disabled){field.focus({preventScroll:true});field.setSelectionRange(focused.from,focused.to);}}
     const nav=root.querySelector('.ops-pages');nav.hidden=max<=1;
